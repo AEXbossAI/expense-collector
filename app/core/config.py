@@ -93,6 +93,13 @@ class Settings(BaseSettings):
     # Допуск для бизнес-ключа дедупа: вендор + сумма + валюта + дата ± N дней
     dedup_date_window_days: int = Field(default=3)
 
+    # ── Локальный буфер ───────────────────────────────────────────────────
+    # Файл ложится сюда ДО подтверждения источника: падение на любом шаге
+    # означает повторную обработку, а не потерю документа.
+    buffer_root: str = Field(default="/data/buffer")
+    uploader_interval_s: int = Field(default=15)
+    uploader_backoff_cap_s: int = Field(default=300)
+
     # ── Инфраструктура ────────────────────────────────────────────────────
     database_url: str = Field(default="postgresql+asyncpg://user:pass@db-router:6432/expenses")
     redis_url: str = Field(default="redis://redis:6379/0")

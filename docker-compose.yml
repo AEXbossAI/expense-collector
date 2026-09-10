@@ -1,0 +1,22 @@
+services:
+  collector:
+    build: .
+    container_name: expense-collector
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - expense_buffer:/data/buffer
+    networks:
+      - db-router
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  expense_buffer:
+
+networks:
+  db-router:
+    external: true

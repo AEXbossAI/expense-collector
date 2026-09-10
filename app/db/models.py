@@ -39,6 +39,11 @@ class Status(str, enum.Enum):
     failed = "failed"                    # разбор упал N раз подряд
 
 
+class Kind(str, enum.Enum):
+    file = "file"            # сообщение или письмо с документом
+    text_only = "text_only"  # сообщение без файла: расход без документа ЛИБО обсуждение
+
+
 class Document(Base):
     """Один документ. Одно письмо может дать несколько документов:
     счёт и квитанция на один расход приходят вместе (наблюдалось живьём)."""
@@ -63,8 +68,14 @@ class Document(Base):
     business_key: Mapped[str | None] = mapped_column(String(255), index=True)
     also_received_from: Mapped[str | None] = mapped_column(Text)
 
+    kind: Mapped[Kind] = mapped_column(Enum(Kind, name="kind_enum"), default=Kind.file)
+
     original_name: Mapped[str] = mapped_column(String(255))
     dropbox_path: Mapped[str | None] = mapped_column(Text)
+    # Путь в локальном буфере. NULL после успешной выгрузки в Dropbox
+    # и у записей kind=text_only, у которых файла нет вовсе.
+    local_path: Mapped[str | None] = mapped_column(Text)
+    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(120))
 
@@ -143,6 +154,30 @@ class MonthState(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (UniqueConstraint("company", "month", name="uq_company_month"),)
+
+
+class PendingUpload(Base):
+    """Очередь выгрузки из локального буфера в Dropbox. Строка живёт, пока
+    файл не лёг в _inbox; ретраи бесконечные с экспоненциальным бэкоффом.
+    Алерт по ВОЗРАСТУ самой старой строки, а не по объёму очереди: час
+    непрерывных ретраев означает протухший токен, и это чинится руками."""
+
+    __tablename__ = "pending_uploads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id"), unique=True, index=True
+    )
+    local_path: Mapped[str] = mapped_column(Text)
+    target_path: Mapped[str] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class MoveIntent(Base):
