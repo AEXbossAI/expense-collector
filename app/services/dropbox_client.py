@@ -28,14 +28,24 @@ class DropboxAuthBroken(Exception):
 
 class DropboxClient:
     def __init__(self) -> None:
-        dbx = dropbox.Dropbox(
+        # Токен командный (team-scoped), тот же, что у OrlandaBot. Такой токен
+        # не адресует конкретный аккаунт: без Dropbox-API-Select-User Dropbox
+        # отвечает BadInputError "token is for an entire Dropbox Business team".
+        # В SDK этот заголовок ставит DropboxTeam.as_user(); у обычного
+        # Dropbox метода as_user нет вовсе.
+        if not settings.dropbox_team_member_id:
+            raise RuntimeError(
+                "DROPBOX_TEAM_MEMBER_ID обязателен: токен командный, "
+                "без выбора участника Dropbox отклонит любой файловый вызов"
+            )
+
+        team = dropbox.DropboxTeam(
             oauth2_refresh_token=settings.dropbox_refresh_token,
             app_key=settings.dropbox_app_key,
             app_secret=settings.dropbox_app_secret,
             timeout=120,
         )
-        if settings.dropbox_team_member_id:
-            dbx = dbx.as_user(settings.dropbox_team_member_id)
+        dbx = team.as_user(settings.dropbox_team_member_id)
 
         namespace = settings.dropbox_namespace_id
         if not namespace:
