@@ -106,6 +106,13 @@ def vat_matches(company: str, vat_rate: float | None) -> bool | None:
     """
     if vat_rate is None:
         return None
+    # Ноль — законная ставка, а не расхождение. Трансграничные B2B-счета
+    # идут по reverse charge с НДС 0%: Slack, Anthropic, Time Doctor,
+    # болгарский телеком — всё это в живом ящике пришло с нулём.
+    # Проверено на боевых данных: без этого исключения проверка
+    # заблокировала бы 9 документов из 20.
+    if vat_rate == 0:
+        return None
     expected = {"orlanda_engineering": 24.0, "orlanda_israel": 18.0}.get(company)
     if expected is None:
         return None

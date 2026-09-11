@@ -164,15 +164,18 @@ async def _handle_file(session, doc: Document) -> None:
         problems.append("сумма не найдена в тексте документа")
     if parsed.doc_date is None:
         problems.append("дата документа не распознана")
-    vat_ok = company.vat_matches(final_company, parsed.vat_rate)
-    if vat_ok is False:
-        problems.append(f"ставка НДС {parsed.vat_rate}% не совпадает с ожидаемой для {final_company}")
+    # Расхождение ставки НДС — замечание, а не блокер. Компанию определил
+    # регистрационный номер, он надёжнее любой косвенной проверки, а ставки
+    # у трансграничных счетов законно отличаются от домашней.
+    notes: list[str] = []
+    if company.vat_matches(final_company, parsed.vat_rate) is False:
+        notes.append(f"ставка НДС {parsed.vat_rate}% не типична для {final_company}")
 
     doc.company = final_company
 
     if problems:
         doc.status = Status.needs_review
-        doc.status_reason = "; ".join(problems)
+        doc.status_reason = "; ".join(problems + notes)
         return
 
     dup = await dedupe.find_exact(session, doc, doc.content_hash)
