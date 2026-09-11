@@ -16,18 +16,24 @@ _MONTHS_EN = (
 
 
 def month_folder(when: datetime) -> str:
-    """Имя папки месяца в соглашении фин директора: August_2026.
+    """Имя папки месяца: September_2026. Год в имени дублируется — так уже
+    заведено у фин директора в обеих компаниях, не ломаем."""
+    return f"{_MONTHS_EN[when.month - 1]}_{when.year}"
 
-    Формат задаётся DROPBOX_MONTH_FORMAT. Поддерживается %B (английское
-    название месяца), %m, %Y — этого хватает и для August_2026,
-    и для 2026-08_August, если решат перейти ради сортировки.
+
+def company_path(company: str, when: datetime) -> str:
+    """Целевая папка документа: <корень компании>/<год>/<Месяц_Год>.
+
+    Реальная структура на 11.09.2026:
+      /Finance/AMS Group_accouting/2026/September_2026
+      /Finance/Orlanda Israel/Invoices/2026/September_2026
+
+    Папка года существует, папку месяца создаём при необходимости.
     """
-    return (
-        settings.dropbox_month_format
-        .replace("%B", _MONTHS_EN[when.month - 1])
-        .replace("%m", f"{when.month:02d}")
-        .replace("%Y", str(when.year))
-    )
+    root = settings.dropbox_company_roots.get(company)
+    if not root:
+        raise KeyError(f"Нет корневой папки Dropbox для компании {company!r}")
+    return f"{root.rstrip('/')}/{when.year}/{month_folder(when)}"
 
 
 def inbox_path(when: datetime, filename: str) -> str:
