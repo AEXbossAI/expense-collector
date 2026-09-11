@@ -5,6 +5,7 @@ import io
 import logging
 
 from app.core.config import get_settings
+from app.core.text import clean
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -27,7 +28,9 @@ def _pdf_text_sync(data: bytes) -> str:
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             for page in pdf.pages[:30]:
                 chunks.append(page.extract_text() or "")
-        return "\n".join(chunks).strip()
+        # Чистим на источнике: извлечение PDF регулярно отдаёт NUL-байты,
+        # а Postgres их в текстовых полях не принимает и роняет весь цикл.
+        return (clean("\n".join(chunks)) or "").strip()
     except Exception as exc:
         logger.warning("pdfplumber не смог прочитать PDF: %s", exc)
         return ""

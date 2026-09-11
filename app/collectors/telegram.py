@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from app.core import health, naming
 from app.core.config import get_settings
+from app.core.text import clean
 from app.db.models import Document, Kind, PendingUpload, Source, Status
 from app.db.session import session_scope
 from app.services import buffer
@@ -82,7 +83,7 @@ async def _store_file(bot: Bot, message: Message, caption: str | None) -> None:
                     source_key=file_unique_id,
                     kind=Kind.file,
                     original_name=original_name,
-                    raw_caption=caption,
+                    raw_caption=clean(caption),
                     sender=str(message.from_user.id) if message.from_user else None,
                     received_at=received_at,
                     company=settings.telegram_company,
@@ -103,7 +104,7 @@ async def _store_file(bot: Bot, message: Message, caption: str | None) -> None:
             original_name=buffer.safe_name(original_name),
             local_path=str(local),
             size_bytes=len(data),
-            raw_caption=caption,
+            raw_caption=clean(caption),
             sender=str(message.from_user.id) if message.from_user else None,
             received_at=received_at,
             # Расходы из этого чата относятся ровно к одной компании,
@@ -142,7 +143,7 @@ async def _store_text(message: Message) -> None:
                 source_key=key,
                 kind=Kind.text_only,
                 original_name="",
-                raw_caption=text,
+                raw_caption=clean(text),
                 sender=str(message.from_user.id) if message.from_user else None,
                 received_at=message.date or datetime.now(timezone.utc),
                 company=settings.telegram_company,

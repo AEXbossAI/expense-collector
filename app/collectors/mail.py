@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.core import health, naming
 from app.core.config import get_settings
+from app.core.text import clean
 from app.db.models import Document, Kind, PendingUpload, Source, Status
 from app.db.session import session_scope
 from app.services import alerts, buffer, mime
@@ -152,7 +153,7 @@ async def _store_email(gm_msgid: str, raw: bytes) -> int:
             logger.info("Письмо без вложений и без пригодного тела: %s", subject[:60])
             return 0
 
-    body_text = mime.text_body(msg)[:20000]
+    body_text = (clean(mime.text_body(msg)) or "")[:20000]
     created = 0
 
     for att in attachments:
@@ -171,7 +172,7 @@ async def _store_email(gm_msgid: str, raw: bytes) -> int:
                 size_bytes=att.size,
                 mime_type=att.content_type,
                 raw_email_body=body_text,
-                raw_caption=subject,
+                raw_caption=clean(subject),
                 sender=sender,
                 received_at=received,
                 status=Status.new,          # компанию определит разборщик

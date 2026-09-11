@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.core import health
 from app.core.config import get_settings
+from app.core.text import clean
 from app.db.models import Document, Kind, ParseAttempt, Source, Status
 from app.db.session import session_scope
 from app.services import alerts, company, dedupe, extract, filer, llm
@@ -64,11 +65,11 @@ async def _log_attempt(session, doc_id: int, text: str | None, model: str | None
     session.add(
         ParseAttempt(
             document_id=doc_id,
-            extracted_text=(text or "")[:200000] or None,
+            extracted_text=(clean(text) or "")[:200000] or None,
             prompt_version=llm.PROMPT_VERSION,
             model=model,
-            result=result,
-            error=error,
+            result=clean(result),
+            error=clean(error),
         )
     )
 
@@ -211,11 +212,11 @@ async def _handle_file(session, doc: Document) -> None:
 
 
 def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> None:
-    doc.vendor = parsed.vendor
+    doc.vendor = clean(parsed.vendor)
     doc.amount = parsed.amount
     doc.currency = parsed.currency
-    doc.purpose = parsed.purpose
-    doc.service_period = parsed.service_period
+    doc.purpose = clean(parsed.purpose)
+    doc.service_period = clean(parsed.service_period)
     parsed_date = _parse_date(parsed.doc_date)
     doc.doc_date = parsed_date or doc.received_at.date()
     doc.month_from_receipt = parsed_date is None
