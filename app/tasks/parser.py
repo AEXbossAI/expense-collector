@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+
+import anthropic
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from app.core import health
 from app.core.config import get_settings
 from app.db.models import Document, Kind, ParseAttempt, Source, Status
 from app.db.session import session_scope
-from app.services import company, dedupe, extract, filer, llm
+from app.services import alerts, company, dedupe, extract, filer, llm
 from app.services.dropbox_client import get_dropbox
 
 logger = logging.getLogger(__name__)
@@ -233,6 +235,11 @@ async def _process_one(doc_id: int) -> None:
                 await _handle_text_only(session, doc)
             else:
                 await _handle_file(session, doc)
+        except anthropic.AuthenticationError:
+            # Не вина документа. Не засчитываем попытку и не трогаем
+            # статус: иначе через три цикла весь инбокс уедет в failed
+            # из-за одного неверного ключа.
+            raise
         except Exception as exc:
             logger.exception("Разбор документа %s упал", doc_id)
             attempts = (
@@ -261,7 +268,15 @@ async def _tick() -> None:
         return
     logger.info("Разборщик: в работе %d документов", len(ids))
     for doc_id in ids:
-        await _process_one(doc_id)
+        try:
+            await _process_one(doc_id)
+        except anthropic.AuthenticationError as exc:
+            await alerts.alert(
+                "anthropic-auth",
+                f"Anthropic отклоняет ключ: {exc}. Разбор остановлен, "
+                f"документы ждут в _inbox и не потеряны.",
+            )
+            return  # остальной батч не трогаем, ключ один на всех
 
 
 async def run() -> None:
