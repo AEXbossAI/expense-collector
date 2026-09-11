@@ -4,10 +4,12 @@ services:
     container_name: expense-collector
     restart: unless-stopped
     env_file: .env
+    # Как у waorlanda и orlandabot: Postgres нативный на хосте, доступ
+    # через haproxy db-router на 127.0.0.1:6432. Входящих портов у
+    # коллектора нет, поэтому ни туннеля, ни балансировщика не нужно.
+    network_mode: host
     volumes:
       - expense_buffer:/data/buffer
-    networks:
-      - db-router
     logging:
       driver: json-file
       options:
@@ -16,7 +18,3 @@ services:
 
 volumes:
   expense_buffer:
-
-networks:
-  db-router:
-    external: true
