@@ -14,6 +14,18 @@ from app.db.models import Document, Status
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Документы в статусе new кандидатами в дубли НЕ считаются.
+#
+# Иначе при разборе первого из пары второй (ещё не разобранный) находится
+# как дубль, а при разборе второго — первый. Оба уходят в очередь, ни один
+# не раскладывается. Поймано на боевом прогоне: пары Tonystam, Slack и
+# Anthropic пометили друг друга и застряли.
+#
+# Правильный порядок: первый разбирается и раскладывается, второй видит
+# уже разложенный и честно помечается дублём.
+_CANDIDATE_STATUSES = [Status.filed, Status.needs_review, Status.probable_duplicate]
+
+
 
 def normalize_vendor(vendor: str | None) -> str:
     """Схлопывает вариации написания поставщика.
@@ -51,7 +63,7 @@ async def find_exact(
     stmt = select(Document).where(
         Document.id != doc.id,
         Document.content_hash == content_hash,
-        Document.status.notin_([Status.ignored, Status.failed]),
+        Document.status.in_(_CANDIDATE_STATUSES),
     )
     return (await session.execute(stmt)).scalars().first()
 
@@ -79,7 +91,7 @@ async def find_business(
     stmt = select(Document).where(
         Document.id != doc.id,
         Document.business_key == key,
-        Document.status.notin_([Status.ignored, Status.failed]),
+        Document.status.in_(_CANDIDATE_STATUSES),
         or_(
             Document.doc_date.is_(None),
             and_(
