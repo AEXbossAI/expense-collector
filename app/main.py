@@ -7,7 +7,7 @@ from app.collectors import telegram
 from app.core import health
 from app.core.config import get_settings
 from app.db.session import init_db
-from app.tasks import uploader
+from app.tasks import parser, uploader
 
 settings = get_settings()
 
@@ -29,21 +29,15 @@ logger = logging.getLogger("app.main")
 async def main() -> None:
     await init_db()
 
+    from app.collectors import mail  # noqa: PLC0415
+
     tasks = [
         telegram.run(),   # непрерывно: апдейты Telegram живут 24 часа
+        mail.run(),       # интервал настраиваемый: IMAP хранит письма сам
         uploader.run(),   # разгребает локальный буфер в Dropbox
+        parser.run(),     # разбирает и раскладывает по папкам компаний
         health.watchdog_loop(),
     ]
-
-    # collector-mail появится следующим коммитом. Его периодичность
-    # настраиваемая вплоть до раза в месяц: IMAP хранит письма сам,
-    # в отличие от Telegram.
-    try:
-        from app.collectors import mail  # noqa: PLC0415
-    except ImportError:
-        logger.info("Почтовый коллектор ещё не реализован, пропускаю")
-    else:
-        tasks.append(mail.run())
 
     logger.info("Запуск %d задач", len(tasks))
     await asyncio.gather(*tasks)

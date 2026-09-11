@@ -49,8 +49,16 @@ class Settings(BaseSettings):
             r"^ATT\d+\.(txt|htm|html)$",
         ]
     )
-    # Bolt шлёт с трёх разных адресов на bolt.eu: чеки, маркетинг, верификацию.
-    # Поэтому фильтруем по адресу отправителя, а не по домену.
+    # Только то, что НИКОГДА не бывает документом расхода.
+    #
+    # Bolt шлёт с трёх разных адресов на bolt.eu: чеки, маркетинг и
+    # верификацию — поэтому фильтруем по адресу, а не по домену.
+    #
+    # feedback@slack.com и info@tele2.ee здесь были и это была ошибка:
+    # Slack присылает с него реальные счета ("your plan has renewed" с
+    # двумя PDF), Tele2 — оператор связи. Игнор по отправителю там, где
+    # вендор шлёт с одного адреса и рассылку, и счёт, тихо теряет расход.
+    # Сомнительное пропускаем: разборщик пометит ignored сам.
     sender_ignore_list: List[str] = Field(
         default_factory=lambda: [
             "no-reply@accounts.google.com",
@@ -58,8 +66,6 @@ class Settings(BaseSettings):
             "mail-noreply@google.com",
             "cyprus@delivery-marketing.bolt.eu",
             "verify@bolt.eu",
-            "info@tele2.ee",
-            "feedback@slack.com",
         ]
     )
 
@@ -87,6 +93,10 @@ class Settings(BaseSettings):
     parser_model: str = Field(default="claude-opus-5")
     parser_interval_s: int = Field(default=600)
     parser_max_attempts: int = Field(default=3)
+    # Сухой прогон: разбирает и пишет результат в БД, но НЕ перекладывает
+    # файлы в папки компаний и ничего не удаляет. Нужен, чтобы посмотреть
+    # раскладку на реальных документах до того, как она случится.
+    parser_dry_run: bool = Field(default=True)
     # Компания определяется точным вхождением названия юрлица в текст, а не
     # самооценкой модели: юрлиц ровно два и их названия известны заранее.
     company_legal_names: dict[str, List[str]] = Field(default_factory=dict)

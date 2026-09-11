@@ -104,6 +104,74 @@ class DropboxClient:
             raise
 
 
+    # ── операции разборщика ───────────────────────────────────────────────
+
+    def _download_sync(self, path: str) -> bytes:
+        _, resp = self._dbx.files_download(path)
+        return resp.content
+
+    async def download(self, path: str) -> bytes:
+        """Читает файл обратно из Dropbox. Локальный буфер удаляется сразу
+        после выгрузки, поэтому разборщик берёт документ отсюда."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._download_sync, path)
+
+    def _ensure_folder_sync(self, path: str) -> None:
+        try:
+            self._dbx.files_create_folder_v2(path)
+            logger.info("Создана папка %s", path)
+        except ApiError as exc:
+            # conflict/folder — папка уже есть, это нормальный исход гонки
+            if "conflict" in str(exc):
+                return
+            raise
+
+    async def ensure_folder(self, path: str) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._ensure_folder_sync, path)
+
+    def _move_sync(self, src: str, dst: str) -> str:
+        try:
+            meta = self._dbx.files_move_v2(src, dst, autorename=False)
+            return meta.metadata.path_display
+        except ApiError as exc:
+            text = str(exc)
+            # Идемпотентность: файл уже на месте после частичного сбоя.
+            # from_lookup/not_found + существующая цель = перемещение
+            # прошло, а подтверждение в БД не записалось.
+            if "not_found" in text or "conflict" in text:
+                try:
+                    meta = self._dbx.files_get_metadata(dst)
+                    logger.info("Файл уже в цели, перемещение не требуется: %s", dst)
+                    return meta.path_display
+                except Exception:
+                    pass
+            raise
+
+    async def move(self, src: str, dst: str) -> str:
+        """Перемещение, в том числе между namespace разных компаний —
+        проверено на живом аккаунте, работает."""
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, self._move_sync, src, dst)
+        except AuthError as exc:
+            raise DropboxAuthBroken(str(exc)) from exc
+
+    def _delete_sync(self, path: str) -> None:
+        self._dbx.files_delete_v2(path)
+
+    async def delete(self, path: str) -> None:
+        """Используется только для status=ignored: рассылки, отрендеренные
+        из HTML-тела, не должны копиться в инбоксе мегабайтами."""
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._delete_sync, path)
+        except ApiError as exc:
+            if "not_found" in str(exc):
+                return
+            raise
+
+
 @lru_cache
 def get_dropbox() -> DropboxClient:
     return DropboxClient()
