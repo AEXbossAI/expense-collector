@@ -222,3 +222,48 @@ class Heartbeat(Base):
     beat_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class RoutingAnswer(Base):
+    """Ответ человека на вопрос очереди — вместе с ПРИЗНАКАМИ документа.
+
+    Запись "документ 5 -> эстонская" через месяц бесполезна. Запись
+    "вендор bolt, отправитель receipts-cyprus@bolt.eu, валюта EUR ->
+    эстонская" — материал, на котором видна закономерность.
+    """
+
+    __tablename__ = "routing_answers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    question: Mapped[str] = mapped_column(String(32))      # company | duplicate
+    answer: Mapped[str] = mapped_column(String(64))        # ключ компании, skip, same, different
+    answered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    answered_by: Mapped[str | None] = mapped_column(String(120))
+
+    # признаки на момент ответа
+    vendor_normalized: Mapped[str | None] = mapped_column(String(255), index=True)
+    sender: Mapped[str | None] = mapped_column(String(320))
+    currency: Mapped[str | None] = mapped_column(String(8))
+    amount: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    source: Mapped[str | None] = mapped_column(String(32))
+
+
+class RoutingRule(Base):
+    """Правило маршрутизации. Создаётся ТОЛЬКО явным действием человека:
+    ни счётчик ответов, ни отсутствие разногласий его не включают."""
+
+    __tablename__ = "routing_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))          # vendor | sender
+    pattern: Mapped[str] = mapped_column(String(255), index=True)
+    company: Mapped[str] = mapped_column(String(64))
+    created_from: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    confirmed_by: Mapped[str | None] = mapped_column(String(120))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)

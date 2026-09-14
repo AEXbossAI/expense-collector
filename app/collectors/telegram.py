@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 
 from app.core import health, naming
@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.core.text import clean
 from app.db.models import Document, Kind, PendingUpload, Source, Status
 from app.db.session import session_scope
-from app.services import buffer
+from app.services import answers, buffer
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -192,6 +192,49 @@ async def on_private(message: Message) -> None:
         logger.exception("Сбой в личном чате %s", message.chat.id)
 
 
+
+
+# ── ответы фин директора на вопросы очереди ───────────────────────────────
+
+
+@router.callback_query(F.data.startswith("co:"))
+async def on_company_answer(query: CallbackQuery) -> None:
+    """Кнопки «Эстонская» / «Израильская» / «Не распределять».
+
+    Ответ применяется ко ВСЕЙ группе документов того же вендора: три чека
+    Bolt за неделю — один вопрос и один ответ.
+    """
+    try:
+        _, company, doc_id = query.data.split(":", 2)
+        who = query.from_user.full_name if query.from_user else "?"
+        async with session_scope() as session:
+            count, text = await answers.answer_company(session, int(doc_id), company, who)
+        await query.answer(text, show_alert=False)
+        if count and query.message:
+            await query.message.edit_text(f"{query.message.text}\n\n✓ {text}")
+    except Exception:
+        logger.exception("Сбой обработки ответа %s", query.data)
+        await query.answer("Не получилось, попробуйте ещё раз")
+
+
+@router.callback_query(F.data.startswith("dup:"))
+async def on_duplicate_answer(query: CallbackQuery) -> None:
+    """Кнопки «Один расход» / «Разные»."""
+    try:
+        _, verdict, doc_id = query.data.split(":", 2)
+        who = query.from_user.full_name if query.from_user else "?"
+        async with session_scope() as session:
+            count, text = await answers.answer_duplicate(
+                session, int(doc_id), verdict == "same", who
+            )
+        await query.answer(text, show_alert=False)
+        if count and query.message:
+            await query.message.edit_text(f"{query.message.text}\n\n✓ {text}")
+    except Exception:
+        logger.exception("Сбой обработки ответа %s", query.data)
+        await query.answer("Не получилось, попробуйте ещё раз")
+
+
 # ── обработка альбомов ────────────────────────────────────────────────────
 
 
@@ -292,6 +335,11 @@ async def run() -> None:
             me.username,
         )
 
+    from app.tasks import digest  # noqa: PLC0415
+
     asyncio.create_task(health.beat_loop("collector-tg"))
+    asyncio.create_task(digest.run(bot))
     logger.info("Телеграм-коллектор запущен как @%s", me.username)
-    await dp.start_polling(bot, allowed_updates=["message", "edited_message"])
+    await dp.start_polling(
+        bot, allowed_updates=["message", "edited_message", "callback_query"]
+    )
