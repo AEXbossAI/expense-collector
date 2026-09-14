@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -26,6 +27,14 @@ async def _group(session: AsyncSession, doc: Document) -> list[Document]:
         )
     ).scalars().all()
     return [d for d in rows if dedupe.normalize_vendor(d.vendor) == key] or [doc]
+
+
+async def _primary_of(session: AsyncSession, doc: Document) -> Document | None:
+    """Документ, с которым этот был сочтён дублем."""
+    match = re.search(r"документ (\d+)", doc.status_reason or "")
+    if not match:
+        return None
+    return await session.get(Document, int(match.group(1)))
 
 
 async def _record(session: AsyncSession, doc: Document, question: str,
@@ -113,16 +122,53 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
     await _record(session, doc, "duplicate", "same" if same else "different", who)
 
     if same:
-        doc.status = Status.ignored
-        doc.status_reason = f"подтверждённый дубль: {doc.status_reason or ''}".strip()
-        doc.resolved_by = who
-        doc.resolved_at = datetime.now(timezone.utc)
+        # Побеждает не тот, кто разобрался первым, а лучший артефакт:
+        # PDF с текстовым слоем против фотографии с бликами и обрезанными
+        # краями. Без этого first-write-wins оставляет худшую копию.
+        #
+        # Подмена — это не обмен статусами: файл победителя лежит в _inbox,
+        # файл проигравшего в папке компании. Их надо реально переложить,
+        # иначе в базе будет одно, а в Dropbox другое.
+        primary = await _primary_of(session, doc)
+        loser, winner = doc, primary
+
+        if primary is not None and dedupe.prefer(doc, primary) is doc:
+            logger.info("Дубль %s лучше основного %s, меняю местами", doc.id, primary.id)
+            try:
+                path, closed = await filer.file_document(
+                    session, doc,
+                    company=primary.company,
+                    vendor=doc.vendor,
+                    amount=float(doc.amount) if doc.amount is not None else None,
+                    currency=doc.currency,
+                    doc_date=doc.doc_date,
+                )
+            except Exception:
+                logger.exception("Не удалось заменить основной экземпляр %s на %s",
+                                 primary.id, doc.id)
+                return 0, "Не получилось заменить экземпляр, попробуйте позже."
+            doc.company = primary.company
+            doc.dropbox_path = path
+            doc.belongs_to_closed_month = closed
+            doc.status = Status.filed
+            doc.status_reason = "подтверждён человеком как основной экземпляр (лучше качеством)"
+            doc.resolved_by = who
+            doc.resolved_at = datetime.now(timezone.utc)
+            loser, winner = primary, doc
+
+        if loser is None:
+            return 0, "Не нашёл, с чем сравнивать."
+
+        loser.status = Status.ignored
+        loser.status_reason = f"подтверждённый дубль: {loser.status_reason or ''}".strip()
+        loser.resolved_by = who
+        loser.resolved_at = datetime.now(timezone.utc)
         try:
-            await filer.discard_ignored(doc)
-            doc.dropbox_path = None
+            await filer.discard_ignored(loser)
+            loser.dropbox_path = None
         except Exception:
-            logger.exception("Не удалось удалить дубль %s из _inbox", doc.id)
-        return 1, "Понято, один расход. Второй экземпляр убран."
+            logger.exception("Не удалось удалить лишний экземпляр %s", loser.id)
+        return 1, "Понято, один расход. Лишний экземпляр убран."
 
     # Разные расходы — документ идёт на обычную раскладку
     doc.status = Status.new
