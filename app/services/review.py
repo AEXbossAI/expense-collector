@@ -86,6 +86,7 @@ async def build(session: AsyncSession) -> list[QueueItem]:
     ).scalars().all()
 
     for doc in dups:
+        primary = await _primary_of(session, doc)
         items.append(
             QueueItem(
                 kind="duplicate",
@@ -94,11 +95,62 @@ async def build(session: AsyncSession) -> list[QueueItem]:
                 document_ids=[doc.id],
                 total=float(doc.amount or 0),
                 currency=doc.currency,
-                lines=[doc.status_reason or ""],
+                lines=[describe_duplicate(doc, primary)],
             )
         )
 
     return items
+
+
+async def _primary_of(session: AsyncSession, doc: Document) -> Document | None:
+    """Документ, с которым этот был сочтён дублем."""
+    import re
+
+    match = re.search(r"документ (\d+)", doc.status_reason or "")
+    if not match:
+        return None
+    return await session.get(Document, int(match.group(1)))
+
+
+def describe_duplicate(doc: Document, primary: Document | None) -> str:
+    """Вопрос формулируется по СУТИ совпадения, а не одинаково для всех.
+
+    Три разных случая, и ответ на них может отличаться:
+      - тот же файл двумя письмами (вендор шлёт счёт и подтверждение оплаты);
+      - два РАЗНЫХ файла из одного письма (счёт и квитанция на один расход);
+      - совпадение по сумме и вендору из разных источников.
+    Формулировка "похоже, тот же расход пришёл дважды" верна только
+    в первом случае и вводит в заблуждение в остальных.
+    """
+    if primary is None:
+        return "Похоже на уже учтённый расход"
+
+    if doc.content_hash and doc.content_hash == primary.content_hash:
+        return (
+            f"Один и тот же файл ({doc.original_name[:34]}) пришёл двумя письмами: "
+            f"«{(primary.raw_caption or '')[:28]}» и «{(doc.raw_caption or '')[:28]}»"
+        )
+
+    if doc.email_id and doc.email_id == primary.email_id:
+        return (
+            f"Из одного письма два разных документа: {primary.original_name[:26]} "
+            f"и {doc.original_name[:26]}. Один расход или два?"
+        )
+
+    if doc.original_name == primary.original_name:
+        # Наблюдалось на Tonystam: "Customer Invoice" и "Credit Card Payment
+        # Confirmation" приходят разными письмами с файлом одного имени, но
+        # разным содержимым — вероятно, во втором счёт с отметкой об оплате.
+        return (
+            f"Двумя письмами пришёл файл с одним именем ({doc.original_name[:30]}), "
+            f"но разным содержимым: «{(primary.raw_caption or '')[:26]}» "
+            f"и «{(doc.raw_caption or '')[:26]}»"
+        )
+
+    return (
+        f"Совпали вендор, сумма и дата с документом {primary.id} "
+        f"({primary.original_name[:30]}), но файлы разные"
+    )
 
 
 def render(items: list[QueueItem]) -> str:
@@ -123,7 +175,7 @@ def render(items: list[QueueItem]) -> str:
         else:
             amount = f"{item.total:.2f} {item.currency or ''}".strip()
             body.append(f"<b>{n}. {item.title}</b> — {amount}")
-            body.append("   Похоже, тот же расход пришёл дважды")
+            body.extend(f"   {line}" for line in item.lines if line)
         body.append("")
 
     return "\n".join(head + body).strip()
