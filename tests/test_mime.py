@@ -117,3 +117,50 @@ def test_slack_не_в_игноре():
     счета: «your plan has renewed» приходит с двумя PDF."""
     msg = email.message_from_bytes(bytes(_letter(sender="feedback@slack.com")))
     assert mime.is_ignored_sender(msg) is False
+
+
+# ── PDF без текстового слоя ───────────────────────────────────────────────
+
+
+def _image_only_pdf() -> bytes:
+    """PDF, состоящий из картинки — то есть скан без текстового слоя.
+
+    Ровно тот случай, ради которого написана ветка «отправить PDF
+    в модель». На боевых данных она не выполнялась ни разу: у всех
+    29 реальных PDF текстовый слой богатый, минимум 440 символов.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (1240, 1754), "white")
+    draw = ImageDraw.Draw(img)
+    draw.text((80, 120), "INVOICE 12345", fill="black")
+    draw.text((80, 200), "Total: 123.45 EUR", fill="black")
+    buf = io.BytesIO()
+    img.save(buf, format="PDF")
+    return buf.getvalue()
+
+
+async def test_pdf_без_текстового_слоя_уходит_в_модель():
+    from app.services import extract
+
+    text, file_data, mime_type = await extract.prepare(_image_only_pdf(), "application/pdf")
+    assert file_data is not None, "скан обязан уйти в модель целиком"
+    assert mime_type == "application/pdf"
+    assert not text or len(text) < extract.MIN_TEXT_CHARS
+
+
+async def test_изображение_уходит_в_модель_как_есть():
+    from app.services import extract
+
+    text, file_data, mime_type = await extract.prepare(b"\xff\xd8\xff", "image/jpeg")
+    assert text is None and file_data is not None
+    assert mime_type == "image/jpeg"
+
+
+async def test_неподдержанный_тип_никуда_не_уходит():
+    from app.services import extract
+
+    text, file_data, mime_type = await extract.prepare(b"PK\x03\x04", "application/zip")
+    assert (text, file_data, mime_type) == (None, None, None)

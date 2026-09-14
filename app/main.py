@@ -20,7 +20,8 @@ logging.basicConfig(
 # fontTools тянется через WeasyPrint при рендере HTML-тела письма в PDF:
 # один такой рендер даёт полсотни строк про таблицы шрифтов.
 for noisy in ("fontTools", "fontTools.subset", "fontTools.ttLib", "weasyprint",
-              "dropbox", "PIL", "urllib3", "asyncio"):
+              "dropbox", "PIL", "urllib3", "asyncio",
+              "alembic.runtime.plugins", "alembic.autogenerate"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 
 logger = logging.getLogger("app.main")

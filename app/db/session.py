@@ -24,12 +24,26 @@ engine = create_async_engine(
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
+def _upgrade_sync() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config("alembic.ini")
+    command.upgrade(cfg, "head")
+
+
 async def init_db() -> None:
-    """Создаёт таблицы. Alembic намеренно не заводится (см. spec-01):
-    цена решения — первое изменение схемы в проде делается через ALTER."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Схема БД проверена")
+    """Схему ведёт alembic, а не create_all.
+
+    Раньше здесь был create_all, и цена этого решения материализовалась:
+    добавление Source.manual потребовало ручного ALTER TYPE в проде,
+    потому что create_all не меняет существующие типы и таблицы.
+    """
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _upgrade_sync)
+    logger.info("Схема БД приведена к head")
 
 
 @asynccontextmanager
