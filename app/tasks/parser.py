@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.core.text import clean
 from app.db.models import Document, Kind, ParseAttempt, RoutingAnswer, Source, Status
 from app.db.session import session_scope
-from app.services import alerts, company, dedupe, extract, filer, llm
+from app.services import alerts, company, dedupe, extract, filer, llm, validate
 from app.services.dropbox_client import get_dropbox
 
 logger = logging.getLogger(__name__)
@@ -32,24 +32,6 @@ def _parse_date(value: str | None) -> date | None:
         return datetime.strptime(value.strip()[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
-
-
-def _amount_present(amount: float | None, text: str | None) -> bool:
-    """Сумма обязана буквально присутствовать в тексте документа.
-
-    Проверка дешевле любой модели и ловит самый дорогой класс ошибок:
-    правдоподобное, но выдуманное число. Проверяем обе записи разделителя
-    и с разделителем разрядов, и без.
-    """
-    if amount is None or not text:
-        return False
-    candidates = {
-        f"{amount:.2f}", f"{amount:.2f}".replace(".", ","),
-        f"{amount:,.2f}", f"{amount:,.2f}".replace(",", " "),
-        f"{amount:.0f}" if amount == int(amount) else None,
-    }
-    haystack = re.sub(r"\s+", " ", text)
-    return any(c and c in haystack for c in candidates)
 
 
 async def _read_bytes(doc: Document) -> bytes | None:
@@ -175,7 +157,7 @@ async def _handle_file(session, doc: Document) -> None:
     _apply_fields(doc, parsed, text)
 
     problems: list[str] = []
-    if not _amount_present(parsed.amount, text):
+    if not validate.amount_present(parsed.amount, text):
         problems.append("сумма не найдена в тексте документа")
     if parsed.doc_date is None:
         problems.append("дата документа не распознана")

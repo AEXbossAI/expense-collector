@@ -100,11 +100,11 @@ def extract_attachments(msg: Message, _depth: int = 0) -> list[Attachment]:
 
         content_type = (part.get_content_type() or "").lower()
 
-        # Пересылка от сотрудников приходит вложенным письмом
+        # Пересылка от сотрудников приходит вложенным письмом.
+        # Явная рекурсия здесь НЕ нужна: msg.walk() уже спускается внутрь
+        # message/rfc822, и добавление рекурсии извлекало каждое вложение
+        # пересылки дважды. Сам контейнер вложением не считаем.
         if content_type == "message/rfc822":
-            for inner in part.get_payload():
-                if isinstance(inner, Message):
-                    found.extend(extract_attachments(inner, _depth + 1))
             continue
 
         filename = decode_str(part.get_filename())
