@@ -16,7 +16,7 @@ from app.core.config import get_settings
 from app.core.text import clean
 from app.db.models import Document, Kind, ParseAttempt, RoutingAnswer, Source, Status
 from app.db.session import session_scope
-from app.services import alerts, company, dedupe, extract, filer, llm, validate
+from app.services import alerts, company, dedupe, extract, filer, llm, rules, validate
 from app.services.dropbox_client import get_dropbox
 
 logger = logging.getLogger(__name__)
@@ -137,8 +137,19 @@ async def _handle_file(session, doc: Document) -> None:
             doc.dropbox_path = None
         return
 
-    # Правило сильнее модели: идентификатор найден — он и решает
-    final_company = detected if detected != company.UNKNOWN else parsed.company
+    # Порядок приоритетов, от сильного к слабому:
+    #   1. идентификатор в документе — говорит об ЭТОМ документе;
+    #   2. правило — говорит лишь о привычке вендора;
+    #   3. ответ модели;
+    #   4. компания по умолчанию.
+    final_company = detected
+    rule_note = None
+    if final_company == company.UNKNOWN:
+        hit = await rules.match(session, parsed.vendor, doc.sender)
+        if hit:
+            final_company, rule_note = hit
+    if final_company == company.UNKNOWN:
+        final_company = parsed.company
     defaulted = False
 
     if final_company == company.UNKNOWN:
@@ -241,7 +252,10 @@ async def _handle_file(session, doc: Document) -> None:
     doc.dropbox_path = path
     doc.belongs_to_closed_month = closed_note
     doc.status = Status.filed
-    doc.status_reason = "компания по умолчанию, в документе признаков нет" if defaulted else None
+    doc.status_reason = (
+        "компания по умолчанию, в документе признаков нет" if defaulted
+        else (f"компания по правилу: {rule_note}" if rule_note else None)
+    )
     doc.resolved_at = datetime.now(timezone.utc)
     logger.info("Документ %s разложен: %s%s", doc.id, path,
                 " (по умолчанию)" if defaulted else "")
