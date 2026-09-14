@@ -104,6 +104,19 @@ class DropboxClient:
             raise
 
 
+    def _upload_bytes_sync(self, data: bytes, target_path: str) -> str:
+        meta = self._dbx.files_upload(data, target_path, mode=WriteMode.overwrite)
+        return meta.content_hash
+
+    async def upload_bytes(self, data: bytes, target_path: str) -> str:
+        """Запись сгенерированного содержимого без промежуточного файла.
+        Используется реестром: он целиком строится в памяти."""
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(None, self._upload_bytes_sync, data, target_path)
+        except AuthError as exc:
+            raise DropboxAuthBroken(str(exc)) from exc
+
     # ── операции разборщика ───────────────────────────────────────────────
 
     def _download_sync(self, path: str) -> bytes:

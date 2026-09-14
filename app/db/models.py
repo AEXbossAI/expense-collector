@@ -28,6 +28,7 @@ class Base(DeclarativeBase):
 class Source(str, enum.Enum):
     telegram = "telegram"
     mail = "mail"
+    manual = "manual"   # положено человеком, найдено реконсилером
 
 
 class Status(str, enum.Enum):

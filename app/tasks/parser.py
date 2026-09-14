@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import re
 
 import anthropic
@@ -13,7 +14,7 @@ from sqlalchemy import select
 from app.core import health
 from app.core.config import get_settings
 from app.core.text import clean
-from app.db.models import Document, Kind, ParseAttempt, Source, Status
+from app.db.models import Document, Kind, ParseAttempt, RoutingAnswer, Source, Status
 from app.db.session import session_scope
 from app.services import alerts, company, dedupe, extract, filer, llm
 from app.services.dropbox_client import get_dropbox
@@ -113,19 +114,24 @@ async def _handle_file(session, doc: Document) -> None:
         doc.status_reason = "файл недоступен ни в буфере, ни в Dropbox"
         return
 
-    text, file_data, mime_type = await extract.prepare(data, doc.mime_type)
+    # Тип может отсутствовать: реконсилер берёт файл из Dropbox, где
+    # заголовка Content-Type нет. Восстанавливаем по расширению.
+    mime = doc.mime_type or mimetypes.guess_type(doc.original_name)[0]
+    text, file_data, mime_type = await extract.prepare(data, mime)
     if text is None and file_data is None:
         doc.status = Status.needs_review
         doc.status_reason = f"тип {doc.mime_type} не поддержан автоматическим разбором"
         await _log_attempt(session, doc.id, None, None, None, doc.status_reason)
         return
 
-    # Для телеграма компания известна из конфига, определять нечего
-    detected, reason = (
-        (settings.telegram_company, "источник телеграм, компания из конфига")
-        if doc.source == Source.telegram
-        else company.detect(text or "")
-    )
+    # Для телеграма компания известна из конфига, для найденных
+    # реконсилером — из папки, куда их положил человек. Определять нечего.
+    if doc.source == Source.telegram:
+        detected, reason = settings.telegram_company, "источник телеграм, компания из конфига"
+    elif doc.source == Source.manual and doc.company:
+        detected, reason = doc.company, "разложено человеком, компания из папки"
+    else:
+        detected, reason = company.detect(text or "")
     hints = company.name_hints(text or "") if detected == company.UNKNOWN else {}
 
     hint_text = doc.raw_caption or doc.raw_email_body or ""
@@ -182,13 +188,36 @@ async def _handle_file(session, doc: Document) -> None:
 
     doc.company = final_company
 
+    if problems and doc.source == Source.manual:
+        # Файл уже лежит в нужной папке, положен человеком. Держать его
+        # вне реестра из-за непройденной проверки — значит оставить
+        # реестр неполным, а неполный реестр бесполезен для закрытия
+        # месяца. Пишем строку с пометкой, что проверить.
+        doc.status = Status.filed
+        doc.status_reason = "разложено вручную; проверить: " + "; ".join(problems + notes)
+        doc.resolved_at = datetime.now(timezone.utc)
+        return
+
     if problems:
         doc.status = Status.needs_review
         doc.status_reason = "; ".join(problems + notes)
         return
 
-    dup = await dedupe.find_exact(session, doc, doc.content_hash)
-    if dup is None:
+    # Человек уже сказал "разные" — правило не имеет права переигрывать
+    # его при переразборе. Без этой проверки business_key вычисляется
+    # заново и документ снова уезжает в очередь с тем же вопросом.
+    said_different = (
+        await session.execute(
+            select(RoutingAnswer.id).where(
+                RoutingAnswer.document_id == doc.id,
+                RoutingAnswer.question == "duplicate",
+                RoutingAnswer.answer == "different",
+            )
+        )
+    ).first() is not None
+
+    dup = None if said_different else await dedupe.find_exact(session, doc, doc.content_hash)
+    if dup is None and not said_different:
         dup = await dedupe.find_business(
             session, doc, parsed.vendor, parsed.amount, parsed.currency, doc.doc_date
         )
@@ -196,6 +225,17 @@ async def _handle_file(session, doc: Document) -> None:
         doc.status = Status.probable_duplicate
         doc.status_reason = f"похож на документ {dup.id} ({dup.original_name})"
         doc.also_received_from = f"дубль {dup.id}"
+        return
+
+    # Документ, разложенный человеком, НЕ перекладываем и не переименовываем.
+    # Разбор нужен только чтобы достать сумму, дату и вендора для реестра.
+    # Переименовать файл фин директора — верный способ, чтобы систему
+    # выключили в тот же день.
+    if doc.source == Source.manual:
+        doc.status = Status.filed
+        doc.status_reason = "разложено вручную, разобрано для реестра"
+        doc.resolved_at = datetime.now(timezone.utc)
+        logger.info("Документ %s разобран без перемещения (положен человеком)", doc.id)
         return
 
     if settings.parser_dry_run:

@@ -7,7 +7,7 @@ from app.collectors import telegram
 from app.core import health
 from app.core.config import get_settings
 from app.db.session import init_db
-from app.tasks import parser, uploader
+from app.tasks import parser, reconciler, uploader
 
 settings = get_settings()
 
@@ -36,6 +36,8 @@ async def main() -> None:
         mail.run(),       # интервал настраиваемый: IMAP хранит письма сам
         uploader.run(),   # разгребает локальный буфер в Dropbox
         parser.run(),     # разбирает и раскладывает по папкам компаний
+        reconciler.run(),        # суточная сверка Dropbox с базой
+        reconciler.registry_loop(),  # перегенерация _реестр.csv батчем
         health.watchdog_loop(),
     ]
 
