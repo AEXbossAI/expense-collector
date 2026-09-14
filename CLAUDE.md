@@ -37,6 +37,18 @@ ssh hetzner-main 'cd /opt/expense-collector && docker compose up -d --build --fo
 
 База `db_expenses` на хостовом Postgres через haproxy `db-router` на `127.0.0.1:6432`. Контейнер в `network_mode: host`, как у `waorlanda` и `orlandabot`. Входящих портов нет, туннель и балансировщик не нужны.
 
+## Резервная копия на OVH
+
+`/opt/expense-collector` на `ovh-main` (193.70.47.219) — **холодный резерв**.
+Код и образ готовы, контейнер намеренно не запущен. Подробности и порядок
+переключения в `STANDBY.md`.
+
+**Второй экземпляр запускать нельзя:** long polling Telegram эксклюзивен
+на токен (409 Conflict, оба теряют апдейты), два IMAP-поллера обработают
+письма дважды.
+
+Сборка на OVH только с `DOCKER_BUILDKIT=0`.
+
 ## Проверка состояния
 
 ```bash
