@@ -151,11 +151,20 @@ async def _handle_file(session, doc: Document) -> None:
 
     # Правило сильнее модели: идентификатор найден — он и решает
     final_company = detected if detected != company.UNKNOWN else parsed.company
+    defaulted = False
+
     if final_company == company.UNKNOWN:
-        doc.status = Status.needs_review
-        doc.status_reason = f"компания не определена ({reason})"
-        _apply_fields(doc, parsed, text)
-        return
+        # Признаков нет ни у одной компании. Если задано умолчание —
+        # применяем его, но помечаем документ, чтобы человек видел, что
+        # решение принято по умолчанию, а не найдено в документе.
+        if settings.default_company and not hints:
+            final_company = settings.default_company
+            defaulted = True
+        else:
+            doc.status = Status.needs_review
+            doc.status_reason = f"компания не определена ({reason})"
+            _apply_fields(doc, parsed, text)
+            return
 
     _apply_fields(doc, parsed, text)
 
@@ -210,8 +219,10 @@ async def _handle_file(session, doc: Document) -> None:
     doc.dropbox_path = path
     doc.belongs_to_closed_month = closed_note
     doc.status = Status.filed
+    doc.status_reason = "компания по умолчанию, в документе признаков нет" if defaulted else None
     doc.resolved_at = datetime.now(timezone.utc)
-    logger.info("Документ %s разложен: %s", doc.id, path)
+    logger.info("Документ %s разложен: %s%s", doc.id, path,
+                " (по умолчанию)" if defaulted else "")
 
 
 def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> None:

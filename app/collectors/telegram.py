@@ -152,6 +152,46 @@ async def _store_text(message: Message) -> None:
         )
 
 
+
+# ── личный чат: регистрация фин директора ─────────────────────────────────
+
+
+async def _remember_chat(name: str, chat_id: int, who: str) -> None:
+    """Пишем в sync_cursors, а не в конфиг: chat_id узнаётся в рантайме,
+    и требовать ради него правки .env и перезапуска контейнера незачем."""
+    from app.db.models import SyncCursor
+
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(SyncCursor).where(SyncCursor.name == name))
+        ).scalar_one_or_none()
+        value = f"{chat_id}|{who}"
+        if row is None:
+            session.add(SyncCursor(name=name, value=value))
+        else:
+            row.value = value
+    logger.info("Зарегистрирован %s: chat_id=%s (%s)", name, chat_id, who)
+
+
+@router.message(F.chat.type == "private")
+async def on_private(message: Message) -> None:
+    """Личный чат. Без этого обработчика /start фин директора улетал в
+    никуда: фильтр по рабочей группе отбрасывал его молча, и узнать её
+    chat_id было неоткуда."""
+    try:
+        user = message.from_user
+        who = " ".join(filter(None, [user.first_name, user.last_name])) if user else "?"
+        await _remember_chat("finance_chat", message.chat.id, who)
+        await message.answer(
+            "Бот подключён.\n\n"
+            "Сюда будут приходить вопросы по расходам, которые система не смогла "
+            "распределить сама: раз в день, одним сообщением, с кнопками.\n\n"
+            f"Ваш идентификатор: {message.chat.id}"
+        )
+    except Exception:
+        logger.exception("Сбой в личном чате %s", message.chat.id)
+
+
 # ── обработка альбомов ────────────────────────────────────────────────────
 
 
