@@ -239,9 +239,18 @@ async def run() -> None:
         settings.imap_poll_interval_s,
         "весь ящик" if settings.imap_backfill_days == 0 else f"{settings.imap_backfill_days} дн.",
     )
+    # Heartbeat пишется независимо от того, удался опрос: коллектор,
+    # падающий каждый цикл, продолжал бы отчитываться о здоровье.
+    # Считаем подряд идущие сбои отдельно.
+    consecutive_failures = 0
+
     while True:
         try:
             await _poll_once()
+            if consecutive_failures:
+                logger.info("Почта восстановилась после %d сбоев", consecutive_failures)
+                alerts.reset("imap-down")
+            consecutive_failures = 0
         except imaplib.IMAP4.error as exc:
             # Один и тот же AUTHENTICATIONFAILED приходит и на неверный
             # пароль, и на запрет паролей приложений политикой домена.
@@ -250,6 +259,18 @@ async def run() -> None:
                 f"IMAP отклоняет доступ к {settings.imap_user}: {exc}. "
                 f"Проверьте пароль приложения и политику домена в админке Workspace.",
             )
-        except Exception:
-            logger.exception("Почтовый коллектор упал на цикле")
+        except Exception as exc:
+            consecutive_failures += 1
+            logger.exception("Почтовый коллектор упал на цикле (подряд: %d)",
+                             consecutive_failures)
+            # Одиночный таймаут до Gmail — обычное дело, следующий цикл
+            # подключится. Три подряд означают, что что-то сломалось
+            # всерьёз, и узнать об этом надо не на закрытии месяца.
+            if consecutive_failures >= 3:
+                await alerts.alert(
+                    "imap-down",
+                    f"Сбор почты не работает {consecutive_failures} циклов подряд "
+                    f"({consecutive_failures * settings.imap_poll_interval_s // 60} мин). "
+                    f"Последняя ошибка: {type(exc).__name__}: {str(exc)[:120]}",
+                )
         await asyncio.sleep(settings.imap_poll_interval_s)
