@@ -12,6 +12,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Без этого stdout буферизуется на 8 КБ, и `docker logs` показывает только
+# то, что пишет alembic в stderr. Живость приложения приходилось проверять
+# пульсами в базе вместо лога — на отладке синка это неприемлемо.
+ENV PYTHONUNBUFFERED=1
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

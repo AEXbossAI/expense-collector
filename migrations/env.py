@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -11,7 +12,19 @@ from app.core.config import get_settings
 from app.db.models import Base
 
 config = context.config
-if config.config_file_name is not None:
+
+# Логирование настраиваем ТОЛЬКО когда alembic запущен своей командой.
+#
+# init_db() гоняет upgrade внутри приложения, а fileConfig ставит
+# logger_root на WARNING из alembic.ini — и затирает basicConfig(INFO),
+# который main.py применил раньше при импорте. Итог: с коммита 703c980,
+# то есть с появления alembic, все logger.info в приложении глохли.
+# В `docker logs` оставались одни ошибки почты, и живость приходилось
+# проверять пульсами в базе вместо лога.
+#
+# Признак «приложение уже настроило логи» — наличие хендлеров у корневого
+# логгера. При запуске из CLI их нет, и конфиг из ini применяется как надо.
+if config.config_file_name is not None and not logging.getLogger().handlers:
     fileConfig(config.config_file_name)
 
 # Пароль живёт в .env, а не в alembic.ini: ini уезжает в git.
