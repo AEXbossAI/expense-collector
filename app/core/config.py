@@ -127,6 +127,70 @@ class Settings(BaseSettings):
     # то, что фин директор считает закрытым.
     reconcile_from: str = Field(default="2026-09")
 
+    # ── Monday: доска расходов ────────────────────────────────────────────
+    # Токен общий с шестью другими приложениями стека, и это не лечится:
+    # бюджет сложности Monday выделяется НА АККАУНТ, а не на токен (замер
+    # 28.09.2026: complexity.before = 20_000_000, сброс раз в 60с), а второй
+    # персональный токен Monday пользователю не выдаёт — перевыпуск заменяет
+    # старый и уронил бы все шесть приложений разом.
+    monday_api_token: str = Field(default="")
+    # Версию API пиновать обязательно: без заголовка Monday применяет версию
+    # аккаунта по умолчанию и меняет её по своему расписанию, а формат ошибки
+    # "Complexity budget exhausted" уже менялся на версии 2025-07.
+    monday_api_version: str = Field(default="2026-04")
+    monday_board_id: int = Field(default=1550620081)
+    monday_todo_board_id: int = Field(default=1542673123)
+    monday_projects_board_id: int = Field(default=1542627875)
+    # Колонка Drawings Num на доске TO DO LIST. В ней лежит код вида
+    # AMR-SAN-AQU-SC-2026-07-1677, который инвойс подрядчика несёт в тексте.
+    monday_task_code_column: str = Field(default="text9__1")
+    # Наши поля -> id колонок доски. В конфиге, а не в коде: правка колонки
+    # на доске не должна требовать релиза.
+    monday_columns: dict[str, str] = Field(default_factory=dict)
+    # month = группа на месяц (ключ совпадает с именем папки Dropbox),
+    # single = всё в одну группу MONDAY_SINGLE_GROUP_ID.
+    monday_group_mode: str = Field(default="month")
+    monday_single_group_id: str = Field(default="group_mm5x742")
+    # Доска целиком на английском, группы не выбиваются из неё.
+    monday_group_prefix: str = Field(default="Expenses ")
+    # Выключено до ручной приёмки, как PARSER_DRY_RUN в спеке №2.
+    monday_sync_enabled: bool = Field(default=False)
+    # Разбирает и печатает, какие items завёл бы, но ничего не пишет.
+    monday_dry_run: bool = Field(default=True)
+    monday_sync_interval_s: int = Field(default=120)
+    monday_backoff_cap_s: int = Field(default=600)
+    # Документов за проход. Лимиты Monday с запасом (20M единиц сложности
+    # в минуту на аккаунт), так что это вежливость, а не защита.
+    monday_batch_size: int = Field(default=5)
+    # Справочник проектов с доски Projects, кэш в БД.
+    monday_projects_cache_ttl_s: int = Field(default=86400)
+
+    # ── Пересчёт валют ────────────────────────────────────────────────────
+    # ECB через frankfurter: отдаёт "единиц валюты за 1 EUR", ключа не надо.
+    fx_ecb_url: str = Field(default="https://api.frankfurter.dev/v1")
+    # Нацбанк Грузии — универсальный запасной источник для всего, чего нет
+    # в наборе ECB. Публикует курсы В ЛАРИ примерно для сорока валют, то есть
+    # "лари за 1 единицу валюты" — направление ПРОТИВОПОЛОЖНОЕ ECB.
+    # Проверено 28.09.2026: GEL и AZN в ECB отсутствуют оба, в НБГ есть.
+    fx_nbg_url: str = Field(
+        default="https://nbg.gov.ge/gw/api/ct/monetarypolicy/currencies/en/json/"
+    )
+    fx_timeout_s: int = Field(default=20)
+
+    # ── Привязка расхода к проекту ────────────────────────────────────────
+    # Порог нечёткого совпадения названия проекта. Ниже порога совпадение не
+    # засчитывается вовсе: «orhot tota» против «Orhot Tora» даёт 0.9, а
+    # случайное созвучие двух разных объектов — заметно меньше.
+    project_match_min_ratio: float = Field(default=0.85)
+    # Категории, которые никогда не относятся к проекту: по ним вопрос
+    # человеку не задаётся вовсе, иначе фин директор получит три десятка
+    # бессмысленных вопросов в месяц и перестанет читать дайджест.
+    overhead_categories: List[str] = Field(
+        default_factory=lambda: [
+            "Software & subscriptions", "Telecom", "Accounting", "Legal", "Insurance",
+        ]
+    )
+
     # ── Локальный буфер ───────────────────────────────────────────────────
     # Файл ложится сюда ДО подтверждения источника: падение на любом шаге
     # означает повторную обработку, а не потерю документа.

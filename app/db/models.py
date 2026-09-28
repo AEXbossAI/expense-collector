@@ -4,6 +4,7 @@ import enum
 from datetime import date, datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -43,6 +44,34 @@ class Status(str, enum.Enum):
 class Kind(str, enum.Enum):
     file = "file"            # сообщение или письмо с документом
     text_only = "text_only"  # сообщение без файла: расход без документа ЛИБО обсуждение
+
+
+class DocKind(str, enum.Enum):
+    """Род документа. НЕ путать с Kind: тот про наличие файла, этот про то,
+    что в файле написано. Нужен в трёх местах сразу — выбор представителя
+    группы дублей (квитанция побеждает счёт, потому что группа Out фиксирует
+    оплату), колонка Document type на доске и дата оплаты."""
+
+    invoice = "invoice"
+    receipt = "receipt"
+    credit_note = "credit_note"
+    proforma = "proforma"
+    other = "other"
+
+
+class ProjectSource(str, enum.Enum):
+    """Откуда взялась привязка к проекту.
+
+    На доску отдельной колонкой НЕ выносится: фин директору там нужен сам
+    проект, а источник привязки нужен на отладке, в сухом прогоне и чтобы
+    отличить ответ человека от догадки матчера.
+    """
+
+    task_code = "task_code"   # код Drawings Num, детерминированно
+    filename = "filename"     # нечёткое совпадение в имени файла
+    text = "text"             # нечёткое совпадение в тексте документа
+    rule = "rule"             # правило по вендору, заведено человеком
+    human = "human"           # ответ человека или правка прямо на доске
 
 
 class Document(Base):
@@ -99,6 +128,59 @@ class Document(Base):
     currency: Mapped[str | None] = mapped_column(String(8))
     # Свободнотекстовая подсказка из документа, НЕ категория учёта
     purpose: Mapped[str | None] = mapped_column(Text)
+
+    # Род документа. Решает, кто победит в группе дублей: группа Out на доске
+    # фиксирует оплату, поэтому квитанция сильнее счёта.
+    doc_kind: Mapped[DocKind | None] = mapped_column(
+        Enum(DocKind, name="doc_kind_enum"), default=None
+    )
+    # Номер документа у поставщика (40378 в «חשבון עסקה 40378»). Надёжнее
+    # связки вендор+сумма+дата: у одного вендора два платежа в один день —
+    # законный сценарий, а два документа с одним номером — нет.
+    doc_number: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    # ── пересчёт в EUR ────────────────────────────────────────────────────
+    # Оригинальные amount/currency не трогаем: они в реестре и в имени файла.
+    # Курс и его дату храним рядом с суммой, иначе через полгода цифру в EUR
+    # нечем объяснить.
+    amount_eur: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    fx_rate: Mapped[float | None] = mapped_column(Numeric(18, 8))
+    # Дата курса, а не дата документа: провайдеры сами откатываются на
+    # последний опубликованный день, и документ от субботы получает пятничный
+    # курс. Записываем фактическую дату, чтобы это было видно.
+    fx_rate_date: Mapped[date | None] = mapped_column(Date)
+    fx_source: Mapped[str | None] = mapped_column(String(16))   # ecb | nbg | none
+
+    # Категория расхода. Выводится из вендора устойчиво: отправитель,
+    # вендор и назначение сцеплены, и на боевых данных это подтвердилось.
+    category: Mapped[str | None] = mapped_column(String(64))
+
+    # ── привязка к проекту ────────────────────────────────────────────────
+    project_monday_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    project_name: Mapped[str | None] = mapped_column(String(255))
+    project_source: Mapped[ProjectSource | None] = mapped_column(
+        Enum(ProjectSource, name="project_source_enum"), default=None
+    )
+    # Все найденные коды задач, когда их больше одного. Колонка Projects на
+    # доске принимает ровно один элемент, поэтому остальные проекты уходят
+    # в Update айтема, а не теряются.
+    task_codes: Mapped[str | None] = mapped_column(Text)
+    task_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+    service_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+
+    # ── зеркало на доске Monday ───────────────────────────────────────────
+    monday_item_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    monday_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    monday_error: Mapped[str | None] = mapped_column(Text)
+    # Что именно мы записали в прошлый раз. Поле, которое человек поправил
+    # руками, мы перезаписывать не имеем права — сравниваем с этим слепком.
+    monday_last_written: Mapped[dict | None] = mapped_column(JSON)
+
+    # Не представитель группы дублей: указывает на того, кто поехал на доску.
+    # NULL у представителя и у одиночных документов.
+    merged_into_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id"), index=True
+    )
 
     status: Mapped[Status] = mapped_column(
         Enum(Status, name="status_enum"), default=Status.new, index=True
@@ -261,10 +343,131 @@ class RoutingRule(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[str] = mapped_column(String(16))          # vendor | sender
     pattern: Mapped[str] = mapped_column(String(255), index=True)
-    company: Mapped[str] = mapped_column(String(64))
+    # Что именно решает правило. Историческое значение — company, поэтому
+    # оно и стоит по умолчанию: существующие строки менять не надо.
+    target: Mapped[str] = mapped_column(String(16), default="company")  # company | project
+    company: Mapped[str | None] = mapped_column(String(64))
+    project_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+    project_name: Mapped[str | None] = mapped_column(String(255))
     created_from: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
     confirmed_by: Mapped[str | None] = mapped_column(String(120))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class FxRate(Base):
+    """Курс на дату. Кэш обязателен: без него каждый документ дёргает
+    провайдера заново, а курс на прошедшую дату не меняется никогда.
+
+    rate_date — дата, которую ВЕРНУЛ провайдер, а не которую мы просили:
+    и ECB, и НБГ откатываются на последний опубликованный день сами, и
+    документ от субботы честно получает пятничный курс.
+    """
+
+    __tablename__ = "fx_rates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rate_date: Mapped[date] = mapped_column(Date)
+    currency: Mapped[str] = mapped_column(String(8))
+    # Смысл зависит от источника: у ECB это «единиц валюты за 1 EUR»,
+    # у НБГ «лари за 1 единицу валюты». Направления противоположные,
+    # поэтому источник хранится рядом и в пересчёте участвует.
+    rate: Mapped[float] = mapped_column(Numeric(18, 8))
+    source: Mapped[str] = mapped_column(String(16))   # ecb | nbg
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("rate_date", "currency", "source", name="uq_fx_rate"),
+    )
+
+
+class MondayPush(Base):
+    """Очередь записи на доску. Устроена как pending_uploads и по той же
+    причине: разбор и раскладка не имеют права падать из-за того, что
+    Monday отвечает 500. У расхода уже есть файл в папке и строка в
+    реестре, доска — производное.
+
+    Алерт по ВОЗРАСТУ старейшей строки, а не по глубине очереди.
+    """
+
+    __tablename__ = "monday_pushes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id"), unique=True, index=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MondayIntent(Base):
+    """Намерение создать айтем, записанное ДО вызова Monday.
+
+    Та же болезнь, что у MoveIntent в спеке №2: транзакции между Monday и
+    Postgres нет. Без намерения падение между create_item и записью
+    monday_item_id даёт второй айтем на тот же расход при следующем проходе,
+    и сумма месяца на доске тихо удваивается.
+    """
+
+    __tablename__ = "monday_intents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    group_id: Mapped[str] = mapped_column(String(64))
+    item_name: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class MondayProject(Base):
+    """Справочник проектов с доски Projects. Кэш на сутки: проекты заводят
+    редко, а тянуть 380 items четырьмя страницами на каждый документ дорого.
+
+    normalized — имя, приведённое к виду, по которому идёт нечёткий матч.
+    Хранится рядом, чтобы не пересчитывать на каждое сравнение.
+    """
+
+    __tablename__ = "monday_projects"
+
+    monday_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    normalized: Mapped[str] = mapped_column(String(255), index=True)
+    group_title: Mapped[str | None] = mapped_column(String(120))
+    shortcut: Mapped[str | None] = mapped_column(String(32))
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class MondayTask(Base):
+    """Код Drawings Num -> задача, проект, вид услуги. Кэш бессрочный:
+    код неизменяем, задача за ним не переезжает на другой проект."""
+
+    __tablename__ = "monday_tasks"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+    task_name: Mapped[str | None] = mapped_column(String(255))
+    project_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+    project_name: Mapped[str | None] = mapped_column(String(255))
+    service_monday_id: Mapped[int | None] = mapped_column(BigInteger)
+    # Код найден в документе, но задачи с таким кодом в Monday нет. Пишем
+    # отрицательный результат тоже, иначе каждый проход будет спрашивать
+    # Monday про заведомо отсутствующую задачу.
+    found: Mapped[bool] = mapped_column(Boolean, default=True)
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
