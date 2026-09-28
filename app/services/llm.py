@@ -13,9 +13,34 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-PROMPT_VERSION = "extract_v1"
+PROMPT_VERSION = "extract_v2"
 
 CompanyKey = Literal["orlanda_engineering", "orlanda_israel", "unknown"]
+
+# Род документа. Решает, кто победит в паре «счёт + квитанция на один
+# расход»: группа Out на доске фиксирует оплату, поэтому квитанция сильнее.
+DocKindKey = Literal["invoice", "receipt", "credit_note", "proforma", "other"]
+
+# Категории нарезаны по боевому корпусу за сентябрь 2026. Список закрытый:
+# свободная категоризация даёт двадцать вариантов написания одного и того же
+# и превращает доску в мусор. Значения английские, потому что доска целиком
+# английская; лейблы заводятся руками по этому же списку, синк их не создаёт.
+CategoryKey = Literal[
+    "Software & subscriptions",
+    "Telecom",
+    "Taxi & local transport",
+    "Flights & travel",
+    "Car rental & leasing",
+    "Fuel",
+    "Accounting",
+    "Legal",
+    "Marketing & advertising",
+    "Office & equipment",
+    "Training & events",
+    "Insurance",
+    "Subcontracting",
+    "Other",
+]
 
 
 class ExtractedDoc(BaseModel):
@@ -51,6 +76,30 @@ class ExtractedDoc(BaseModel):
     service_period: str | None = Field(
         default=None, description="Период оказания услуги, если отличается от даты документа."
     )
+    doc_kind: DocKindKey = Field(
+        default="other",
+        description="Что это за документ. receipt — квитанция, чек, подтверждение ОПЛАТЫ "
+        "(есть отметка об оплате, слова paid/received/שולם). invoice — счёт к оплате. "
+        "credit_note — кредит-нота, возврат. proforma — проформа. "
+        "Если документ и счёт, и подтверждение оплаты одновременно — receipt.",
+    )
+    doc_number: str | None = Field(
+        default=None,
+        description="Номер документа у поставщика: Invoice No, חשבון עסקה, Receipt #. "
+        "Только цифры и буквы самого номера, без слова «номер» и без префикса вида №.",
+    )
+    category: CategoryKey = Field(
+        default="Other",
+        description="Категория расхода из закрытого списка. Выбирай по тому, ЗА ЧТО платим, "
+        "а не кому: чек Bolt — Taxi & local transport, счёт Google Workspace — "
+        "Software & subscriptions, счёт подрядчика за расчёт конструкции — Subcontracting.",
+    )
+    project_hint: str | None = Field(
+        default=None,
+        description="Название объекта или проекта, если оно прямо названо в документе "
+        "(например «Aqua sence Netanya», «Orhot Tora»). Дословно, как написано. "
+        "Не выдумывай и не обобщай: нет упоминания — null.",
+    )
     notes: str | None = Field(
         default=None, description="Что помешало разобрать документ, если что-то помешало."
     )
@@ -80,6 +129,22 @@ SYSTEM = """Ты разбираешь документы по расходам �
 Бери итог к оплате с налогом. Если итогов несколько (в разных валютах,
 до и после налога) — бери финальный к оплате.
 Если сумму прочитать не удалось, верни null. НЕ придумывай её.
+
+РОД ДОКУМЕНТА:
+Счёт к оплате и квитанция об оплате — разные документы, и различать их
+обязательно: на один расход они приходят парой, а учитывается один.
+Квитанция несёт отметку об оплате: paid, payment received, оплачено, שולם,
+номер транзакции, последние цифры карты. Счёт несёт срок оплаты и реквизиты.
+
+НОМЕР ДОКУМЕНТА:
+В израильских документах он подписан «חשבון עסקה 40378» — нужно 40378.
+В европейских — Invoice No / Arve nr. Номер поставщика, НЕ номер заказа
+и не номер клиента.
+
+ПРОЕКТ:
+Если в документе прямо назван объект или проект — перенеси название
+дословно в project_hint. Это подсказка для сопоставления со справочником,
+поэтому важна точность написания, а не красота. Ничего не додумывай.
 
 Если документ не является счётом, инвойсом, чеком или квитанцией —
 поставь is_expense_document=false и не заполняй остальные поля."""
