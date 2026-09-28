@@ -139,6 +139,20 @@ def eur_from_nbg(amount: Decimal, rate_currency_gel: Decimal, rate_eur_gel: Deci
     return (amount * rate_currency_gel / rate_eur_gel).quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
+def effective_rate(rate_eur_gel: Decimal, rate_currency_gel: Decimal) -> Decimal:
+    """Сколько единиц валюты дают за 1 EUR — то же, что отдаёт ECB.
+
+    Кросс НБГ считается через лари, но наружу такой курс отдавать нельзя:
+    строка «4.90 AZN @ 1.5343» предлагает разделить и получить 3.19, тогда
+    как в сумме стоит 2.53. Курс, который не объясняет цифру рядом с собой,
+    хуже отсутствующего. Поэтому храним и показываем эффективный:
+    делением на него сумма в евро получается всегда.
+    """
+    if rate_currency_gel <= 0 or rate_eur_gel <= 0:
+        raise ValueError("курсы НБГ должны быть положительными")
+    return (rate_eur_gel / rate_currency_gel).quantize(Decimal("0.00000001"))
+
+
 def parse_ecb(payload: dict, currency: str) -> Quote | None:
     """Ответ frankfurter: {"date": "2026-09-18", "rates": {"ILS": 3.4812}}.
 
@@ -338,7 +352,11 @@ async def to_eur(amount: Decimal | float | None, currency: str | None, on: date)
     eur_in_gel = await _nbg_quote("EUR", found.rate_date)
     return Converted(
         amount_eur=eur_from_nbg(value, found.rate, eur_in_gel.rate),
-        rate=found.rate,
+        # Наружу отдаём ЭФФЕКТИВНЫЙ курс: сколько единиц валюты за 1 EUR.
+        # Сырой курс НБГ («лари за манат») строку «4.90 AZN @ 1.5343» делает
+        # ложью: разделив, получишь 3.19, а в сумме стоит 2.53. Курс,
+        # который не объясняет цифру рядом с собой, хуже отсутствующего.
+        rate=effective_rate(eur_in_gel.rate, found.rate),
         rate_date=found.rate_date,
         source=NBG,
     )
