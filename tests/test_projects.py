@@ -144,6 +144,58 @@ def test_одно_слово_на_два_проекта_даёт_неодноз�
     assert set(hit.ambiguous) == {"Eilat project Plot 103-104-105-106", "Hotel Eilat"}
 
 
+def test_обычное_слово_из_текста_не_привязывает_к_проекту():
+    """Регрессия 28.09.2026, самая дорогая за весь спек.
+
+    Правило «различающее слово» применялось к тексту документа, а в
+    названиях проектов сидят обычные английские слова. Прогон на боевых
+    данных выдал чужой проект почти каждому накладному расходу:
+    Anthropic -> «Port Market Tel Aviv», Tonystam -> «m.a. green city Ltd»,
+    такси Bolt -> «Riding Tel-Aviv», конференция -> «Matiani Tbilisi».
+
+    Слово «begin» в «Billing period begins» не делает подписку расходом
+    по объекту «ALIZA BEGIN 10 Rishon LeZion».
+    """
+    catalog = CATALOG + [
+        (1, "ALIZA BEGIN 10 Rishon LeZion"),
+        (2, "Port Market Tel Aviv"),
+        (3, "m.a. green city Ltd"),
+    ]
+    hit = projects.match_project(
+        "Fwd-Invoice-Time-Doctor-Software_body.pdf",
+        "Time Doctor LLC. Billing period begins on September 5. "
+        "Green city office market rate applies.",
+        catalog, RATIO,
+    )
+    assert hit.project_monday_id is None
+    assert not hit.ambiguous
+
+
+def test_однословное_название_в_тексте_не_ищется():
+    """«Island» и «Factory» — реальные названия проектов. Искать их
+    в тексте инвойса значит ловить любое употребление слова."""
+    catalog = [(3084545967, "Island"), (2536843740, "Factory")]
+    hit = projects.match_project(
+        "Invoice-2945.pdf", "Delivered to the island factory warehouse", catalog, RATIO
+    )
+    assert hit.project_monday_id is None
+    assert projects.is_distinctive("Island") is False
+    assert projects.is_distinctive("Aqua sence Netanya") is True
+
+
+def test_вхождение_считается_по_границам_слов():
+    """Подстрочный поиск нашёл бы «island» внутри «Highlands»."""
+    assert projects._contains_phrase("delivery to highlands", "island") is False
+    assert projects._contains_phrase("delivery to the island", "island") is True
+
+
+def test_однословное_название_в_имени_файла_работает():
+    """В имени файла ограничения нет: его пишет человек и осознанно."""
+    catalog = [(3084545967, "Island"), (2536843740, "Factory")]
+    hit = projects.match_project("Island_invoice_2026-09.pdf", None, catalog, RATIO)
+    assert hit.project_monday_id == 3084545967
+
+
 def test_накладной_расход_не_матчится_ни_на_что():
     """Счёт Google Workspace не относится к объекту, и выдумывать привязку
     для него нельзя."""

@@ -191,7 +191,7 @@ async def _handle_file(session, doc: Document) -> None:
             return
 
     _apply_fields(doc, parsed, text)
-    await apply_project(session, doc, parsed, text)
+    await apply_project(session, doc, parsed.project_hint, text)
 
     problems: list[str] = []
     if not validate.amount_present(parsed.amount, text):
@@ -306,12 +306,13 @@ def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> 
     doc.category = clean(parsed.category)
 
 
-async def apply_project(session, doc: Document, parsed: llm.ExtractedDoc,
+async def apply_project(session, doc: Document, project_hint: str | None,
                         text: str | None) -> None:
     """Уровни каскада привязки к проекту, от сильного к слабому.
 
-    Публичная: второй вызывающий — скрипт переразбора задним числом.
-    Дублировать каскад ради него было бы хуже.
+    Публичная и берёт подсказку строкой, а не весь разбор: второй
+    вызывающий — скрипт переразбора, и ему нужно пересчитать проекты по
+    уже сохранённому тексту, без нового вызова модели.
 
     Ни один уровень не блокирует раскладку документа: пустой проект — это
     норма для накладного расхода, а не причина держать документ вне реестра.
@@ -320,7 +321,7 @@ async def apply_project(session, doc: Document, parsed: llm.ExtractedDoc,
     # Подсказка модели участвует наравне с именем файла и текстом: она
     # вытащена из документа дословно и часто чище, чем сырой текст с
     # развалившимся ивритом.
-    haystack = " ".join(filter(None, [text, parsed.project_hint]))
+    haystack = " ".join(filter(None, [text, project_hint]))
 
     try:
         found = await projects.resolve(

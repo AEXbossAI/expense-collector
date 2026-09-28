@@ -111,6 +111,35 @@ def core_words(name: str) -> set[str]:
     }
 
 
+def is_distinctive(name: str) -> bool:
+    """Можно ли искать это название в тексте документа.
+
+    Название из одного слова искать в тексте нельзя: проекты называются
+    «Island», «Factory», «Shferber», и такое слово встречается в общих
+    условиях любого инвойса. Двух значимых слов уже достаточно —
+    «Aqua sence Netanya» случайно в тексте не появится.
+
+    В имени файла ограничения нет: там название пишет человек и осознанно.
+    """
+    return len(core_words(name)) >= 2
+
+
+def _contains_phrase(haystack: str, phrase: str) -> bool:
+    """Вхождение по границам слов, а не подстрокой.
+
+    Подстрочный поиск даёт «island» внутри «Highlands» и «reem» внутри
+    «agreement». Обе строки уже нормализованы, поэтому достаточно
+    сравнить последовательности токенов.
+    """
+    if not phrase or not haystack:
+        return False
+    needle = phrase.split()
+    hay = haystack.split()
+    return any(
+        hay[i:i + len(needle)] == needle for i in range(len(hay) - len(needle) + 1)
+    )
+
+
 def _windows(tokens: list[str], size: int) -> list[str]:
     if size <= 0 or size > len(tokens):
         return []
@@ -150,45 +179,66 @@ def match_project(
 
     file_norm = normalize(filename)
     text_norm = normalize(text)
-    haystack = f"{file_norm} {text_norm}".strip()
-    if not haystack:
+    if not file_norm and not text_norm:
         return Match(reason="ни имени файла, ни текста")
 
-    # 1. Полное вхождение названия. Самое надёжное: «Aqua sence Netanya»
-    #    целиком присутствует в тексте инвойса.
+    # 1. Полное вхождение названия.
+    #
+    #    По имени файла — любое название: имя человек пишет руками и
+    #    осознанно. По тексту документа — только достаточно различимое,
+    #    то есть минимум из двух значимых слов.
+    #
+    #    Иначе проект «Island» или «Factory» ловится в любом инвойсе,
+    #    где это слово встретилось в общих условиях. Границы слов
+    #    обязательны: подстрока «island» сидит внутри «Highlands».
     hits = [
-        (pid, name) for pid, name in projects
-        if (n := normalize(name)) and n in haystack
+        (pid, name, ProjectSource.filename)
+        for pid, name in projects
+        if _contains_phrase(file_norm, normalize(name))
     ]
+    if not hits:
+        hits = [
+            (pid, name, ProjectSource.text)
+            for pid, name in projects
+            if is_distinctive(name) and _contains_phrase(text_norm, normalize(name))
+        ]
     if len(hits) == 1:
-        pid, name = hits[0]
-        where = ProjectSource.filename if normalize(name) in file_norm else ProjectSource.text
+        pid, name, where = hits[0]
         return Match(pid, name, where, reason=f"полное вхождение названия «{name}»")
     if len(hits) > 1:
         return Match(
-            ambiguous=tuple(n for _, n in hits),
+            ambiguous=tuple(n for _, n, _ in hits),
             reason=f"полное вхождение сразу у {len(hits)} проектов",
         )
 
+    # Дальше — ТОЛЬКО имя файла.
+    #
+    # Одного слова из названия проекта в тексте документа недостаточно:
+    # в названиях сидят обычные английские слова (green, city, market,
+    # begin, riding), и в многостраничном инвойсе такое слово найдётся
+    # всегда. Прогон 28.09.2026 на боевых данных дал чужой проект почти
+    # каждому накладному расходу: Anthropic -> «Port Market Tel Aviv»,
+    # Tonystam -> «m.a. green city Ltd», такси Bolt -> «Riding Tel-Aviv».
+    #
+    # Имя файла человек пишет сам и коротко, поэтому совпадение в нём —
+    # намерение, а не совпадение.
+    if not file_norm:
+        return Match(reason="в тексте полного названия нет, имени файла нет тоже")
+
     # 2. Различающее слово названия. «Amnir» -> Amnir Project Hedera.
-    words = set(haystack.split())
-    hits = [(pid, name) for pid, name in projects if core_words(name) & words]
+    words = set(file_norm.split())
+    hits = [(pid, name, ProjectSource.filename)
+            for pid, name in projects if core_words(name) & words]
     if len(hits) == 1:
-        pid, name = hits[0]
-        where = (
-            ProjectSource.filename
-            if core_words(name) & set(file_norm.split())
-            else ProjectSource.text
-        )
+        pid, name, where = hits[0]
         return Match(pid, name, where, reason=f"различающее слово названия «{name}»")
     if len(hits) > 1:
         return Match(
-            ambiguous=tuple(n for _, n in hits),
+            ambiguous=tuple(n for _, n, _ in hits),
             reason=f"различающее слово подошло {len(hits)} проектам",
         )
 
-    # 3. Опечатка в имени файла. Только по имени: там её пишет человек,
-    #    и там текст короткий, а по всему документу это дорого и шумно.
+    # 3. Опечатка в имени файла: «Orhot Tota» вместо «Orhot Tora».
     if file_norm:
         scored = [
             (pid, name, best_ratio(normalize(name), file_norm)) for pid, name in projects

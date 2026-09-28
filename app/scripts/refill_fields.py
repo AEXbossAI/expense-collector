@@ -19,6 +19,7 @@ parse_attempts: разбор можно перезапустить задним 
     docker exec expense-collector python -m app.scripts.refill_fields
     docker exec expense-collector python -m app.scripts.refill_fields --preview 3
     docker exec expense-collector python -m app.scripts.refill_fields --apply
+    docker exec expense-collector python -m app.scripts.refill_fields --fix-projects
 
 Без ключей — список документов, модель не вызывается и денег не стоит.
 `--preview N` прогоняет модель на N документах и показывает её ответ,
@@ -38,7 +39,7 @@ from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.core.text import clean
-from app.db.models import DocKind, Document, Kind, ParseAttempt, Status
+from app.db.models import DocKind, Document, Kind, ParseAttempt, ProjectSource, Status
 from app.db.session import session_scope
 from app.services import extract, llm
 from app.tasks import parser
@@ -118,7 +119,7 @@ async def _refill_one(doc_id: int, apply: bool) -> str:
         doc.doc_number = (clean(parsed.doc_number) or "")[:64] or None
         doc.category = clean(parsed.category)
 
-        await parser.apply_project(session, doc, parsed, text)
+        await parser.apply_project(session, doc, parsed.project_hint, text)
 
         session.add(
             ParseAttempt(
@@ -132,6 +133,60 @@ async def _refill_one(doc_id: int, apply: bool) -> str:
         )
         project = f" -> {doc.project_name}" if doc.project_name else ""
         return f"{summary}{project}"
+
+
+async def fix_projects(apply: bool) -> None:
+    """Пересчёт привязки к проекту по уже сохранённому тексту.
+
+    Модель не вызывается: `apply_project` берёт подсказку строкой, а текст
+    лежит в parse_attempts с прошлого разбора. Нужен после правки матчера —
+    28.09.2026 он раздал чужие проекты почти каждому накладному расходу,
+    и починить это надо было не заплатив за разбор второй раз.
+
+    Привязка по КОДУ ЗАДАЧИ не трогается: она детерминированная, ошибиться
+    там матчер не мог.
+    """
+    since = reconcile_from()
+    async with session_scope() as session:
+        docs = (
+            await session.execute(
+                select(Document).where(
+                    Document.doc_date >= since,
+                    Document.kind == Kind.file,
+                ).order_by(Document.id)
+            )
+        ).scalars().all()
+
+        texts: dict[int, str] = {}
+        for row in (
+            await session.execute(
+                select(ParseAttempt.document_id, ParseAttempt.extracted_text)
+                .where(ParseAttempt.extracted_text.is_not(None))
+                .order_by(ParseAttempt.id)
+            )
+        ).all():
+            texts[row[0]] = row[1] or ""
+
+        changed = 0
+        for doc in docs:
+            before = doc.project_name
+            if doc.project_source == ProjectSource.task_code:
+                continue
+            doc.project_monday_id = None
+            doc.project_name = None
+            doc.project_source = None
+            await parser.apply_project(session, doc, None, texts.get(doc.id))
+            after = doc.project_name
+            if before != after:
+                changed += 1
+                print(f"  id={doc.id:4d}  {(before or '—')[:30]:32s} -> {after or '—'}")
+
+        if not apply:
+            await session.rollback()
+
+    print(f"\nИзменилось привязок: {changed}")
+    if not apply:
+        print("Это только показ, в базу ничего не записано. Применить: --fix-projects --apply")
 
 
 async def _list_only(ids: list[int]) -> None:
@@ -148,6 +203,10 @@ async def _list_only(ids: list[int]) -> None:
 
 
 async def main(mode: str, limit: int | None) -> None:
+    if mode == "fix-projects":
+        await fix_projects("--apply" in sys.argv)
+        return
+
     ids = await _select(limit)
     if not ids:
         print("Нечего переразбирать: у всех документов новые поля заполнены.")
@@ -187,7 +246,9 @@ if __name__ == "__main__":
     argv = sys.argv
     limit = None
     mode = "list"
-    if "--apply" in argv:
+    if "--fix-projects" in argv:
+        mode = "fix-projects"
+    elif "--apply" in argv:
         mode = "apply"
     elif "--preview" in argv:
         mode = "preview"
