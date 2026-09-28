@@ -1,5 +1,9 @@
 aiogram>=3.2,<4.0
-SQLAlchemy>=2.0,<3.0
+# Extra [asyncio] обязателен: он тянет greenlet, без которого
+# sqlalchemy.ext.asyncio не импортируется вовсе. Транзитивно greenlet
+# приезжал не всегда — на пересборке 28.09.2026 свежая SQLAlchemy его не
+# поставила, и контейнер ушёл в краш-луп на старте.
+SQLAlchemy[asyncio]>=2.0,<3.0
 asyncpg>=0.29,<1.0
 alembic>=1.13,<2.0
 pydantic>=2.5,<3.0
