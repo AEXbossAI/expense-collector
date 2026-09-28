@@ -145,9 +145,10 @@ def test_пустые_поля_не_попадают_в_значения():
 
 
 def test_месяц_совпадает_с_именем_папки_dropbox():
+    """Месяц живёт в колонке Billing month, а не в отдельной группе:
+    доску по месяцам не режут, все расходы лежат в одной группе Out."""
     values = monday_map.fields(make_doc())
     assert values[monday_map.BILLING_MONTH] == "September_2026"
-    assert monday_map.group_title(make_doc(), "Expenses ") == "Expenses September_2026"
 
 
 def test_ссылка_на_dropbox_экранируется():

@@ -86,24 +86,6 @@ async def verify_columns() -> None:
     logger.info("Колонки доски сверены: %d штук", len(settings.monday_columns))
 
 
-async def ensure_group(session: AsyncSession, doc: Document) -> str:
-    """Группа месяца, при необходимости создаётся.
-
-    Ключ группы совпадает с именем папки Dropbox (`September_2026`), чтобы
-    доска и папка сверялись глазами без пересчётов.
-    """
-    if settings.monday_group_mode != "month":
-        return settings.monday_single_group_id
-
-    title = monday_map.group_title(doc, settings.monday_group_prefix)
-    groups = await monday.board_groups(settings.monday_board_id)
-    if title in groups:
-        return groups[title]
-    group_id = await monday.create_group(settings.monday_board_id, title)
-    logger.info("Создана группа %s (%s)", title, group_id)
-    return group_id
-
-
 # ── наполнение очереди ────────────────────────────────────────────────────
 
 
@@ -258,7 +240,9 @@ async def _push(session: AsyncSession, doc: Document) -> None:
         logger.info("Айтем %s обновлён (документ %s)", doc.monday_item_id, doc.id)
         return
 
-    group_id = await ensure_group(session, doc)
+    # Всегда одна группа. Групп по месяцам нет: месяц стоит в колонке
+    # Billing month, а доску по месяцам не режут.
+    group_id = settings.monday_group_id
     name = monday_map.item_name(doc)
     payload, written = monday_map.column_values(values, settings.monday_columns)
 

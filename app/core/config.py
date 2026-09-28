@@ -147,12 +147,10 @@ class Settings(BaseSettings):
     # Наши поля -> id колонок доски. В конфиге, а не в коде: правка колонки
     # на доске не должна требовать релиза.
     monday_columns: dict[str, str] = Field(default_factory=dict)
-    # month = группа на месяц (ключ совпадает с именем папки Dropbox),
-    # single = всё в одну группу MONDAY_SINGLE_GROUP_ID.
-    monday_group_mode: str = Field(default="month")
-    monday_single_group_id: str = Field(default="group_mm5x742")
-    # Доска целиком на английском, группы не выбиваются из неё.
-    monday_group_prefix: str = Field(default="Expenses ")
+    # Все расходы идут в одну группу Out, всегда. Групп-месяцев нет и не
+    # должно быть: месяц и так стоит в колонке Billing month у каждой
+    # строки, а разрезание доски по месяцам ломает привычный вид.
+    monday_group_id: str = Field(default="group_mm5x742")
     # Выключено до ручной приёмки, как PARSER_DRY_RUN в спеке №2.
     monday_sync_enabled: bool = Field(default=False)
     # Разбирает и печатает, какие items завёл бы, но ничего не пишет.

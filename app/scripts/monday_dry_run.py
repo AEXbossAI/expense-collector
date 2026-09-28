@@ -76,8 +76,7 @@ async def _show() -> None:
             except fx.RateUnavailable as exc:
                 money = f"БЕЗ СУММЫ ({exc})"
 
-            group_title = monday_map.group_title(winner, settings.monday_group_prefix)
-            print(f"[{group_title}] {monday_map.item_name(winner)}")
+            print(f"[{winner.company}] {monday_map.item_name(winner)}")
             print(f"    сумма   : {money}")
             print(f"    проект  : {winner.project_name or '—'} "
                   f"({winner.project_source.value if winner.project_source else 'нет'})")

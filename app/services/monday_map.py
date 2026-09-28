@@ -86,7 +86,7 @@ SOURCE_LABELS = {
 }
 
 # Monday режет имя айтема на 255; 100 берём ради того, чтобы строка
-# читалась в свёрнутой группе без горизонтальной прокрутки.
+# читалась без горизонтальной прокрутки.
 NAME_LIMIT = 100
 
 
@@ -105,7 +105,8 @@ def dropbox_url(path: str | None) -> str | None:
 def item_name(doc: Document) -> str:
     """`2026-09-07 · Anthropic, PBC · Claude Pro subscription`
 
-    Дата первой, потому что группа месяца сортируется по ней глазами.
+    Дата первой, потому что строки в группе читаются столбиком и
+    сортируются по ней глазами.
     Неизвестные части заменяются заглушкой, а не выкидываются: иначе
     позиции разъезжаются и строки перестают читаться столбиком.
     """
@@ -115,13 +116,6 @@ def item_name(doc: Document) -> str:
     parts = [when, vendor] + ([purpose] if purpose else [])
     name = " · ".join(parts)
     return name[: NAME_LIMIT - 1] + "…" if len(name) > NAME_LIMIT else name
-
-
-def group_title(doc: Document, prefix: str) -> str:
-    """Ключ группы совпадает с именем папки Dropbox (`September_2026`),
-    чтобы доска и папка сверялись глазами без пересчётов."""
-    when = doc.doc_date or doc.received_at.date()
-    return f"{prefix}{naming.month_folder(_as_datetime(when))}"
 
 
 def _as_datetime(value: date):

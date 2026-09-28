@@ -203,22 +203,6 @@ async def board_columns(board_id: int) -> dict[str, str]:
     return {c["id"]: c["type"] for c in boards[0].get("columns") or []}
 
 
-_BOARD_GROUPS = """
-query ($board: [ID!]) {
-  boards(ids: $board) { groups { id title } }
-}
-"""
-
-
-async def board_groups(board_id: int) -> dict[str, str]:
-    """title -> id. Группа адресуется по id, а заводится по названию."""
-    data = await gql(_BOARD_GROUPS, {"board": [str(board_id)]})
-    boards = data.get("boards") or []
-    if not boards:
-        raise MondayError(f"Доска {board_id} не найдена или недоступна токену")
-    return {g["title"]: g["id"] for g in boards[0].get("groups") or []}
-
-
 _TASK_BY_CODE = """
 query ($board: ID!, $column: String!, $value: String!) {
   items_page_by_column_values(
@@ -341,18 +325,6 @@ async def item_values(item_id: int) -> dict[str, str]:
 
 
 # ── запись ────────────────────────────────────────────────────────────────
-
-_CREATE_GROUP = """
-mutation ($board: ID!, $name: String!) {
-  create_group(board_id: $board, group_name: $name) { id }
-}
-"""
-
-
-async def create_group(board_id: int, title: str) -> str:
-    data = await gql(_CREATE_GROUP, {"board": str(board_id), "name": title})
-    return (data.get("create_group") or {})["id"]
-
 
 _CREATE_ITEM = """
 mutation ($board: ID!, $group: String!, $name: String!, $values: JSON!) {
