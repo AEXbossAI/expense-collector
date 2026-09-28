@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from app.db.models import Source, Status
+import pytest
+
+from app.db.models import DocKind, Source, Status
 from app.services import dedupe, registry
 from app.tasks import reconciler
 from app.services.validate import amount_present as _amount_present
@@ -45,6 +47,65 @@ def test_pdf_побеждает_фотографию():
     assert dedupe.prefer(pdf, photo) is pdf
 
 
+# ── кто из группы дублей поедет на доску ──────────────────────────────────
+
+
+@dataclass
+class _Doc2:
+    """Стаб с типом документа и id. Отдельный от _Doc намеренно: старый
+    тест выше обязан продолжать проходить без изменений — это и есть
+    регрессионная защита для правила «pdf сильнее фото»."""
+
+    id: int
+    mime_type: str | None
+    size_bytes: int | None
+    doc_kind: DocKind | None = None
+
+
+def test_квитанция_побеждает_счёт():
+    """Группа Out на доске фиксирует ОПЛАТУ, поэтому документ,
+    подтверждающий её, ближе к факту расхода, чем счёт.
+
+    Без этого яруса пара «счёт + квитанция» на один расход отдавала бы
+    на доску случайный из двух.
+    """
+    invoice = _Doc2(1, "application/pdf", 900_000, DocKind.invoice)
+    receipt = _Doc2(2, "application/pdf", 20_000, DocKind.receipt)
+    assert dedupe.prefer(invoice, receipt) is receipt
+    assert dedupe.prefer(receipt, invoice) is receipt
+
+
+def test_квитанция_сильнее_даже_если_она_фотография():
+    """Ярус типа документа стоит выше яруса формата: лучше читаемый факт
+    оплаты, чем красивый счёт, который могли и не оплатить."""
+    invoice_pdf = _Doc2(1, "application/pdf", 900_000, DocKind.invoice)
+    receipt_photo = _Doc2(2, "image/jpeg", 50_000, DocKind.receipt)
+    assert dedupe.prefer(invoice_pdf, receipt_photo) is receipt_photo
+
+
+def test_при_равных_рангах_побеждает_меньший_id():
+    """Детерминированность важнее справедливости: иначе перезапуск синка
+    выберет другого представителя и заведёт вторую строку на тот же расход."""
+    a = _Doc2(7, "application/pdf", 10_000, DocKind.invoice)
+    b = _Doc2(3, "application/pdf", 10_000, DocKind.invoice)
+    assert dedupe.choose_representative([a, b]).id == 3
+    assert dedupe.choose_representative([b, a]).id == 3
+
+
+def test_представитель_группы_из_трёх():
+    """Живой случай: счёт из письма, квитанция из того же письма и
+    фотография того же чека из телеграма."""
+    invoice = _Doc2(1, "application/pdf", 80_000, DocKind.invoice)
+    receipt = _Doc2(2, "application/pdf", 60_000, DocKind.receipt)
+    photo = _Doc2(3, "image/jpeg", 900_000, DocKind.receipt)
+    assert dedupe.choose_representative([invoice, photo, receipt]).id == 2
+
+
+def test_пустая_группа_это_ошибка_вызывающего():
+    with pytest.raises(ValueError):
+        dedupe.choose_representative([])
+
+
 # ── кто вообще может быть кандидатом в дубли ──────────────────────────────
 #
 # Правило жило только в комментарии, и его уже один раз нарушили:
@@ -56,18 +117,24 @@ def test_новый_документ_не_кандидат_в_дубли():
     """Иначе при разборе первого из пары второй (ещё не разобранный)
     находится как дубль, а при разборе второго — первый. Оба уходят
     в очередь, ни один не раскладывается."""
-    assert dedupe.is_dedupe_candidate(Status.new) is False
+    assert dedupe.is_dedupe_candidate(Status.new, None) is False
 
 
 def test_разложенный_документ_кандидат():
-    assert dedupe.is_dedupe_candidate(Status.filed) is True
-    assert dedupe.is_dedupe_candidate(Status.needs_review) is True
-    assert dedupe.is_dedupe_candidate(Status.probable_duplicate) is True
+    assert dedupe.is_dedupe_candidate(Status.filed, None) is True
+    assert dedupe.is_dedupe_candidate(Status.needs_review, None) is True
+    assert dedupe.is_dedupe_candidate(Status.probable_duplicate, None) is True
 
 
 def test_отброшенный_и_упавший_не_кандидаты():
-    assert dedupe.is_dedupe_candidate(Status.ignored) is False
-    assert dedupe.is_dedupe_candidate(Status.failed) is False
+    assert dedupe.is_dedupe_candidate(Status.ignored, None) is False
+    assert dedupe.is_dedupe_candidate(Status.failed, None) is False
+
+
+def test_схлопнутый_документ_не_кандидат():
+    """Он сам указывает на другой документ. Найти его как «основной»
+    значит построить цепочку, где дубль ссылается на дубль."""
+    assert dedupe.is_dedupe_candidate(Status.filed, 42) is False
 
 
 # ── проверка суммы ────────────────────────────────────────────────────────
