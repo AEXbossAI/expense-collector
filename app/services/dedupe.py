@@ -19,11 +19,28 @@ settings = get_settings()
 # Иначе при разборе первого из пары второй (ещё не разобранный) находится
 # как дубль, а при разборе второго — первый. Оба уходят в очередь, ни один
 # не раскладывается. Поймано на боевом прогоне: пары Tonystam, Slack и
-# Anthropic пометили друг друга и застряли.
+# Anthropic пометили друг друга и застряли (коммит 665fe8a).
 #
 # Правильный порядок: первый разбирается и раскладывается, второй видит
 # уже разложенный и честно помечается дублём.
 _CANDIDATE_STATUSES = [Status.filed, Status.needs_review, Status.probable_duplicate]
+
+
+def is_dedupe_candidate(status: Status | None) -> bool:
+    """Может ли документ вообще оказаться «тем самым, уже учтённым».
+
+    Вынесено из SQL отдельной чистой функцией не ради красоты: правило выше
+    жило только в комментарии, и его уже один раз нарушили (коммит 665fe8a).
+    Теперь у него есть тест, и следующая правка запроса сломает тест,
+    а не прод.
+    """
+    return status in _CANDIDATE_STATUSES
+
+
+def _candidate_clause():
+    """То же правило в терминах SQL. Читает ту же константу, что и
+    `is_dedupe_candidate`, чтобы они не разъехались."""
+    return Document.status.in_(_CANDIDATE_STATUSES)
 
 
 
@@ -63,7 +80,7 @@ async def find_exact(
     stmt = select(Document).where(
         Document.id != doc.id,
         Document.content_hash == content_hash,
-        Document.status.in_(_CANDIDATE_STATUSES),
+        _candidate_clause(),
     )
     return (await session.execute(stmt)).scalars().first()
 
@@ -91,7 +108,7 @@ async def find_business(
     stmt = select(Document).where(
         Document.id != doc.id,
         Document.business_key == key,
-        Document.status.in_(_CANDIDATE_STATUSES),
+        _candidate_clause(),
         or_(
             Document.doc_date.is_(None),
             and_(

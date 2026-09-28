@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from app.db.models import Source
+from app.db.models import Source, Status
 from app.services import dedupe, registry
 from app.tasks import reconciler
 from app.services.validate import amount_present as _amount_present
@@ -43,6 +43,31 @@ def test_pdf_побеждает_фотографию():
     photo = _Doc("image/jpeg", 900_000)
     assert dedupe.prefer(photo, pdf) is pdf
     assert dedupe.prefer(pdf, photo) is pdf
+
+
+# ── кто вообще может быть кандидатом в дубли ──────────────────────────────
+#
+# Правило жило только в комментарии, и его уже один раз нарушили:
+# коммит 665fe8a «пары документов помечали дублями друг друга и застревали».
+# Теперь у него есть тест.
+
+
+def test_новый_документ_не_кандидат_в_дубли():
+    """Иначе при разборе первого из пары второй (ещё не разобранный)
+    находится как дубль, а при разборе второго — первый. Оба уходят
+    в очередь, ни один не раскладывается."""
+    assert dedupe.is_dedupe_candidate(Status.new) is False
+
+
+def test_разложенный_документ_кандидат():
+    assert dedupe.is_dedupe_candidate(Status.filed) is True
+    assert dedupe.is_dedupe_candidate(Status.needs_review) is True
+    assert dedupe.is_dedupe_candidate(Status.probable_duplicate) is True
+
+
+def test_отброшенный_и_упавший_не_кандидаты():
+    assert dedupe.is_dedupe_candidate(Status.ignored) is False
+    assert dedupe.is_dedupe_candidate(Status.failed) is False
 
 
 # ── проверка суммы ────────────────────────────────────────────────────────
