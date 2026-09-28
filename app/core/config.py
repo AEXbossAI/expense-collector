@@ -188,6 +188,7 @@ class Settings(BaseSettings):
     overhead_categories: List[str] = Field(
         default_factory=lambda: [
             "Software & subscriptions", "Telecom", "Accounting", "Legal", "Insurance",
+            "Education", "Payroll & social",
         ]
     )
 

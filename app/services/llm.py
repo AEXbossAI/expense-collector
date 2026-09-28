@@ -39,6 +39,12 @@ CategoryKey = Literal[
     "Training & events",
     "Insurance",
     "Subcontracting",
+    # Школа детей и национальное страхование — расходы компании (решение
+    # владельца), но к объекту не относятся никогда. Без своих категорий
+    # они разъезжались: четыре одинаковых школьных счёта попали в Other,
+    # пятый в Training & events.
+    "Education",
+    "Payroll & social",
     "Other",
 ]
 
@@ -92,7 +98,9 @@ class ExtractedDoc(BaseModel):
         default="Other",
         description="Категория расхода из закрытого списка. Выбирай по тому, ЗА ЧТО платим, "
         "а не кому: чек Bolt — Taxi & local transport, счёт Google Workspace — "
-        "Software & subscriptions, счёт подрядчика за расчёт конструкции — Subcontracting.",
+        "Software & subscriptions, счёт подрядчика за расчёт конструкции — Subcontracting, "
+        "счёт школы или курсов для сотрудника и его семьи — Education, взносы в "
+        "национальное страхование и зарплатные платежи — Payroll & social.",
     )
     project_hint: str | None = Field(
         default=None,

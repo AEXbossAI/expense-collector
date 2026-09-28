@@ -20,6 +20,7 @@ parse_attempts: разбор можно перезапустить задним 
     docker exec expense-collector python -m app.scripts.refill_fields --preview 3
     docker exec expense-collector python -m app.scripts.refill_fields --apply
     docker exec expense-collector python -m app.scripts.refill_fields --fix-projects
+    docker exec expense-collector python -m app.scripts.refill_fields --recategorize "Other"
 
 Без ключей — список документов, модель не вызывается и денег не стоит.
 `--preview N` прогоняет модель на N документах и показывает её ответ,
@@ -135,6 +136,29 @@ async def _refill_one(doc_id: int, apply: bool) -> str:
         return f"{summary}{project}"
 
 
+async def _clear_categories(names: list[str]) -> int:
+    """Сбрасывает категорию у документов, которые надо переспросить заново.
+
+    Нужен, когда список категорий пополнился: документ, уже разложенный
+    в Other за неимением лучшего, сам собой в новую категорию не переедет.
+    После сброса он снова попадает под `_needs_refill`.
+    """
+    since = reconcile_from()
+    async with session_scope() as session:
+        docs = (
+            await session.execute(
+                select(Document).where(
+                    Document.doc_date >= since,
+                    Document.kind == Kind.file,
+                    Document.category.in_(names),
+                )
+            )
+        ).scalars().all()
+        for doc in docs:
+            doc.category = None
+        return len(docs)
+
+
 async def fix_projects(apply: bool) -> None:
     """Пересчёт привязки к проекту по уже сохранённому тексту.
 
@@ -202,10 +226,22 @@ async def _list_only(ids: list[int]) -> None:
               f"{str(d.amount or '?'):>10s} {d.currency or ''}")
 
 
-async def main(mode: str, limit: int | None) -> None:
+async def main(mode: str, limit) -> None:
     if mode == "fix-projects":
         await fix_projects("--apply" in sys.argv)
         return
+
+    if mode == "recategorize":
+        names = [n.strip() for n in (limit or "").split(",") if n.strip()]
+        if not names:
+            print("Укажите категории через запятую: --recategorize \"Other,Training & events\"")
+            return
+        n = await _clear_categories(names)
+        print(f"Сброшено категорий: {n} ({', '.join(names)})")
+        if n == 0:
+            return
+        limit = None
+        mode = "apply"
 
     ids = await _select(limit)
     if not ids:
@@ -248,6 +284,9 @@ if __name__ == "__main__":
     mode = "list"
     if "--fix-projects" in argv:
         mode = "fix-projects"
+    elif "--recategorize" in argv:
+        mode = "recategorize"
+        limit = argv[argv.index("--recategorize") + 1]
     elif "--apply" in argv:
         mode = "apply"
     elif "--preview" in argv:
