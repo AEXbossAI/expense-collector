@@ -191,7 +191,7 @@ async def _handle_file(session, doc: Document) -> None:
             return
 
     _apply_fields(doc, parsed, text)
-    await _apply_project(session, doc, parsed, text)
+    await apply_project(session, doc, parsed, text)
 
     problems: list[str] = []
     if not validate.amount_present(parsed.amount, text):
@@ -306,9 +306,12 @@ def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> 
     doc.category = clean(parsed.category)
 
 
-async def _apply_project(session, doc: Document, parsed: llm.ExtractedDoc,
-                         text: str | None) -> None:
+async def apply_project(session, doc: Document, parsed: llm.ExtractedDoc,
+                        text: str | None) -> None:
     """Уровни каскада привязки к проекту, от сильного к слабому.
+
+    Публичная: второй вызывающий — скрипт переразбора задним числом.
+    Дублировать каскад ради него было бы хуже.
 
     Ни один уровень не блокирует раскладку документа: пустой проект — это
     норма для накладного расхода, а не причина держать документ вне реестра.
