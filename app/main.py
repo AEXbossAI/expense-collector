@@ -7,7 +7,7 @@ from app.collectors import telegram
 from app.core import health
 from app.core.config import get_settings
 from app.db.session import init_db
-from app.tasks import parser, reconciler, sweeper, uploader
+from app.tasks import monday_sync, parser, reconciler, sweeper, uploader
 
 settings = get_settings()
 
@@ -39,6 +39,8 @@ async def main() -> None:
         parser.run(),     # разбирает и раскладывает по папкам компаний
         reconciler.run(),        # суточная сверка Dropbox с базой
         reconciler.registry_loop(),  # перегенерация _реестр.csv батчем
+        monday_sync.run(),       # зеркало расходов на доске Monday; само выйдет,
+                                 # если MONDAY_SYNC_ENABLED=false
         sweeper.run(),    # подвисшие перемещения: единственное место тихой потери
         health.watchdog_loop(),
     ]

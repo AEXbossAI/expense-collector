@@ -235,6 +235,29 @@ async def on_duplicate_answer(query: CallbackQuery) -> None:
         await query.answer("Не получилось, попробуйте ещё раз")
 
 
+@router.callback_query(F.data.startswith("pr:"))
+async def on_project_answer(query: CallbackQuery) -> None:
+    """Кнопки с проектами и «Общие расходы».
+
+    Документ к этому моменту уже разложен и уже в реестре: ответ проставляет
+    проект на доске, а не решает судьбу файла. Поэтому ошибиться здесь
+    дёшево — правится тем же нажатием на доске.
+    """
+    try:
+        _, project, doc_id = query.data.split(":", 2)
+        who = query.from_user.full_name if query.from_user else "?"
+        async with session_scope() as session:
+            count, text = await answers.answer_project(
+                session, int(doc_id), None if project == "none" else int(project), who
+            )
+        await query.answer(text, show_alert=False)
+        if count and query.message:
+            await query.message.edit_text(f"{query.message.text}\n\n✓ {text}")
+    except Exception:
+        logger.exception("Сбой обработки ответа %s", query.data)
+        await query.answer("Не получилось, попробуйте ещё раз")
+
+
 # ── обработка альбомов ────────────────────────────────────────────────────
 
 

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Document, Status
+from app.db.models import Document, RoutingAnswer, Status
 from app.services import dedupe
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,93 @@ async def build(session: AsyncSession) -> list[QueueItem]:
             )
         )
 
+    items.extend(await _project_questions(session))
     return items
+
+
+async def _project_questions(session: AsyncSession) -> list[QueueItem]:
+    """Вопрос «к какому проекту», и только там, где он осмыслен.
+
+    Документ при этом УЖЕ разложен и уже в реестре: незнание проекта не
+    повод держать расход вне папки. Поэтому вопрос строится по `filed`,
+    а не по `needs_review`.
+
+    Накладные расходы не спрашиваются вовсе. Software & subscriptions,
+    Accounting, Legal — общие по определению, и тридцать бессмысленных
+    вопросов в месяц кончатся тем, что дайджест перестанут открывать.
+    """
+    asked = set(
+        (
+            await session.execute(
+                select(RoutingAnswer.document_id).where(RoutingAnswer.question == "project")
+            )
+        ).scalars().all()
+    )
+
+    rows = (
+        await session.execute(
+            select(Document)
+            .where(
+                Document.status == Status.filed,
+                Document.merged_into_id.is_(None),
+                Document.project_monday_id.is_(None),
+                Document.category.is_not(None),
+                Document.category.not_in(settings.overhead_categories),
+            )
+            .order_by(Document.doc_date, Document.id)
+        )
+    ).scalars().all()
+
+    groups: dict[str, list[Document]] = {}
+    for doc in rows:
+        if doc.id in asked:
+            continue
+        key = dedupe.normalize_vendor(doc.vendor) or f"doc{doc.id}"
+        groups.setdefault(key, []).append(doc)
+
+    items: list[QueueItem] = []
+    for key, docs in groups.items():
+        head = docs[0]
+        item = QueueItem(
+            kind="project",
+            key=key,
+            title=head.vendor or head.original_name or "без названия",
+            document_ids=[d.id for d in docs],
+            total=sum(float(d.amount or 0) for d in docs),
+            currency=head.currency,
+        )
+        for d in docs[:4]:
+            when = d.doc_date.strftime("%d.%m") if d.doc_date else "дата?"
+            item.lines.append(f"{when} · {d.amount or '?'} {d.currency or ''} · {d.purpose or '—'}")
+        items.append(item)
+
+    return items
+
+
+async def recent_projects(session: AsyncSession, limit: int = 5) -> list[tuple[int, str]]:
+    """Проекты, по которым расходы уже проходили, свежие первыми.
+
+    Кнопки строятся по ним, а не по всем 380 проектам: в дайджесте нужен
+    короткий список того, что реально в работе.
+    """
+    rows = (
+        await session.execute(
+            select(Document.project_monday_id, Document.project_name)
+            .where(Document.project_monday_id.is_not(None))
+            .order_by(Document.doc_date.desc())
+        )
+    ).all()
+
+    out: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for pid, name in rows:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        out.append((pid, name or str(pid)))
+        if len(out) >= limit:
+            break
+    return out
 
 
 async def _primary_of(session: AsyncSession, doc: Document) -> Document | None:
@@ -158,11 +244,15 @@ def render(items: list[QueueItem]) -> str:
     n_company = sum(1 for i in items if i.kind == "company")
     n_dup = sum(1 for i in items if i.kind == "duplicate")
 
+    n_project = sum(1 for i in items if i.kind == "project")
+
     head = ["<b>Расходы, требующие решения</b>", ""]
     if n_company:
         head.append(f"Не удалось определить компанию: {n_company}")
     if n_dup:
         head.append(f"Возможные дубли: {n_dup}")
+    if n_project:
+        head.append(f"Неизвестен проект: {n_project}")
     head.append("")
 
     body: list[str] = []

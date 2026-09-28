@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from app.core.config import get_settings
-from app.db.models import Heartbeat, PendingUpload
+from app.db.models import Heartbeat, MondayPush, PendingUpload
 from app.db.session import session_scope
 from app.services import alerts
 
@@ -85,6 +85,30 @@ async def _check_upload_queue(now: datetime, deadline: timedelta) -> None:
         alerts.reset("upload-stuck")
 
 
+async def _check_monday_queue(now: datetime, deadline: timedelta) -> None:
+    """Та же логика, что у очереди выгрузки: алерт по возрасту, не по глубине.
+
+    Отдельный алерт нужен потому, что молчащая очередь доски выглядит как
+    «всё хорошо»: файлы на месте, реестр полон, и только на доске чего-то
+    не хватает — а этого никто не считает.
+    """
+    async with session_scope() as session:
+        oldest = (
+            await session.execute(select(func.min(MondayPush.created_at)))
+        ).scalar_one_or_none()
+        depth = (await session.execute(select(func.count(MondayPush.id)))).scalar_one()
+
+    if oldest and now - oldest > deadline:
+        await alerts.alert(
+            "monday-stuck",
+            f"Очередь записи на доску Monday не движется "
+            f"{int((now - oldest).total_seconds() // 60)} мин, документов: {depth}. "
+            f"Файлы и реестр не затронуты, расходятся только строки на доске.",
+        )
+    elif not oldest:
+        alerts.reset("monday-stuck")
+
+
 async def watchdog_loop() -> None:
     deadline = timedelta(seconds=settings.heartbeat_alert_after_s)
     while True:
@@ -93,5 +117,6 @@ async def watchdog_loop() -> None:
         try:
             await _check_components(now, deadline)
             await _check_upload_queue(now, deadline)
+            await _check_monday_queue(now, deadline)
         except Exception:
             logger.exception("Watchdog упал на проверке")

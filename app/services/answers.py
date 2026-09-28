@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Document, RoutingAnswer, Status
+from app.db.models import Document, MondayProject, ProjectSource, RoutingAnswer, Status
 from app.services import dedupe, filer
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,59 @@ async def answer_company(session: AsyncSession, doc_id: int, company: str,
         return handled, f"Не распределяем. Документов: {handled}."
     title = {"orlanda_engineering": "эстонскую", "orlanda_israel": "израильскую"}.get(company, company)
     return handled, f"Отнесено на {title} компанию. Документов: {handled}."
+
+
+async def answer_project(session: AsyncSession, doc_id: int, project_monday_id: int | None,
+                         who: str) -> tuple[int, str]:
+    """Ответ на вопрос «к какому проекту».
+
+    Применяется ко всей группе документов того же вендора, как и вопрос про
+    компанию. «Общие расходы» — полноценный ответ: он записывается в журнал
+    и закрывает вопрос навсегда, иначе тот же вендор спросит снова в
+    следующем месяце.
+
+    Правило из ответа НЕ выводится: правило создаёт человек командой
+    `python -m app.scripts.rules project`, а журнал ответов — материал,
+    на котором закономерность видна.
+    """
+    doc = await session.get(Document, doc_id)
+    if doc is None or doc.status != Status.filed:
+        return 0, "Этот вопрос уже закрыт."
+
+    project = None
+    if project_monday_id is not None:
+        project = await session.get(MondayProject, project_monday_id)
+        if project is None:
+            return 0, "Такого проекта нет в справочнике."
+
+    key = dedupe.normalize_vendor(doc.vendor)
+    rows = (
+        await session.execute(
+            select(Document).where(
+                Document.status == Status.filed,
+                Document.merged_into_id.is_(None),
+                Document.project_monday_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    group = [d for d in rows if dedupe.normalize_vendor(d.vendor) == key] if key else [doc]
+    if doc not in group:
+        group.append(doc)
+
+    for d in group:
+        await _record(session, d, "project", str(project_monday_id or "none"), who)
+        if project is not None:
+            d.project_monday_id = project.monday_id
+            d.project_name = project.name
+            d.project_source = ProjectSource.human
+        # Синк подберёт документ заново: updated_at обновится сам, а
+        # monday_synced_at останется старым.
+        d.resolved_by = who
+        d.resolved_at = datetime.now(timezone.utc)
+
+    if project is None:
+        return len(group), f"Общие расходы, без проекта. Документов: {len(group)}."
+    return len(group), f"Отнесено на проект «{project.name}». Документов: {len(group)}."
 
 
 async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,

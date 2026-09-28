@@ -14,9 +14,28 @@ from sqlalchemy import select
 from app.core import health
 from app.core.config import get_settings
 from app.core.text import clean
-from app.db.models import Document, Kind, ParseAttempt, RoutingAnswer, Source, Status
+from app.db.models import (
+    DocKind,
+    Document,
+    Kind,
+    ParseAttempt,
+    ProjectSource,
+    RoutingAnswer,
+    Source,
+    Status,
+)
 from app.db.session import session_scope
-from app.services import alerts, company, dedupe, extract, filer, llm, rules, validate
+from app.services import (
+    alerts,
+    company,
+    dedupe,
+    extract,
+    filer,
+    llm,
+    projects,
+    rules,
+    validate,
+)
 from app.services.dropbox_client import get_dropbox
 
 logger = logging.getLogger(__name__)
@@ -116,7 +135,13 @@ async def _handle_file(session, doc: Document) -> None:
         detected, reason = company.detect(text or "")
     hints = company.name_hints(text or "") if detected == company.UNKNOWN else {}
 
-    hint_text = doc.raw_caption or doc.raw_email_body or ""
+    # Имя файла — полноценный источник подсказок, а не украшение: человек
+    # пишет туда и вендора, и объект. До этой правки `original_name` в
+    # разбор не попадал вовсе.
+    hint_text = f"Имя файла: {doc.original_name}"
+    body = doc.raw_caption or doc.raw_email_body or ""
+    if body:
+        hint_text += f"\n\n{body}"
     if hints:
         hint_text += "\n\nНайденные в тексте названия (могут принадлежать и покупателю, и поставщику): " + str(hints)
 
@@ -166,6 +191,7 @@ async def _handle_file(session, doc: Document) -> None:
             return
 
     _apply_fields(doc, parsed, text)
+    await _apply_project(session, doc, parsed, text)
 
     problems: list[str] = []
     if not validate.amount_present(parsed.amount, text):
@@ -271,6 +297,61 @@ def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> 
     doc.doc_date = parsed_date or doc.received_at.date()
     doc.month_from_receipt = parsed_date is None
     doc.business_key = dedupe.business_key(parsed.vendor, parsed.amount, parsed.currency)
+
+    try:
+        doc.doc_kind = DocKind(parsed.doc_kind)
+    except ValueError:
+        doc.doc_kind = DocKind.other
+    doc.doc_number = (clean(parsed.doc_number) or "")[:64] or None
+    doc.category = clean(parsed.category)
+
+
+async def _apply_project(session, doc: Document, parsed: llm.ExtractedDoc,
+                         text: str | None) -> None:
+    """Уровни каскада привязки к проекту, от сильного к слабому.
+
+    Ни один уровень не блокирует раскладку документа: пустой проект — это
+    норма для накладного расхода, а не причина держать документ вне реестра.
+    Неоднозначность уходит вопросом в дайджест отдельной строкой.
+    """
+    # Подсказка модели участвует наравне с именем файла и текстом: она
+    # вытащена из документа дословно и часто чище, чем сырой текст с
+    # развалившимся ивритом.
+    haystack = " ".join(filter(None, [text, parsed.project_hint]))
+
+    try:
+        found = await projects.resolve(
+            session,
+            filename=doc.original_name,
+            text=haystack,
+            caption=doc.raw_caption or doc.raw_email_body,
+        )
+    except Exception:
+        # Monday недоступен — это не повод не разложить документ.
+        logger.exception("Привязка к проекту упала на документе %s", doc.id)
+        return
+
+    doc.task_codes = ", ".join(found.task_codes) or None
+    if found.project_monday_id:
+        doc.project_monday_id = found.project_monday_id
+        doc.project_name = found.project_name
+        doc.project_source = found.source
+        doc.task_monday_id = found.task_monday_id
+        doc.service_monday_id = found.service_monday_id
+        logger.info("Документ %s -> проект %s (%s)", doc.id, found.project_name, found.reason)
+        return
+
+    # Уровень 3: правило по вендору. Слабее найденного в документе кода и
+    # сильнее догадки: код говорит об ЭТОМ документе, правило — о привычке
+    # вендора работать на одном объекте.
+    hit = await rules.match_project(session, doc.vendor, doc.sender)
+    if hit is not None:
+        doc.project_monday_id, doc.project_name = hit
+        doc.project_source = ProjectSource.rule
+        logger.info("Документ %s -> проект %s по правилу", doc.id, doc.project_name)
+        return
+
+    logger.debug("Документ %s без проекта: %s", doc.id, found.reason)
 
 
 # ── цикл ──────────────────────────────────────────────────────────────────
