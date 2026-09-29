@@ -184,17 +184,72 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
     return stats
 
 
+CURSOR_NAME = "reconcile_run"
+
+
+async def _last_run() -> datetime | None:
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(SyncCursor).where(SyncCursor.name == CURSOR_NAME))
+        ).scalar_one_or_none()
+    if row is None or not row.value:
+        return None
+    try:
+        return datetime.fromisoformat(row.value)
+    except ValueError:
+        return None
+
+
+async def _remember_run(when: datetime) -> None:
+    async with session_scope() as session:
+        row = (
+            await session.execute(select(SyncCursor).where(SyncCursor.name == CURSOR_NAME))
+        ).scalar_one_or_none()
+        if row is None:
+            session.add(SyncCursor(name=CURSOR_NAME, value=when.isoformat()))
+        else:
+            row.value = when.isoformat()
+
+
+def _due_in(last: datetime | None, now: datetime) -> float:
+    """Сколько ещё ждать до сверки, зная время прошлой.
+
+    Раньше цикл просто спал сутки перед первой сверкой, а время прогона
+    нигде не хранилось. Поэтому КАЖДЫЙ перезапуск контейнера обнулял отсчёт:
+    28.09.2026 контейнер пересобирали восемь раз, и сверка не случилась ни
+    разу — последняя была 25-го. При ежедневных выкатах она не случилась бы
+    никогда, а это тихая потеря: файлы, которые фин директор кладёт в папки
+    руками, попадают в систему только через реконсилер.
+    """
+    if last is None:
+        return 0.0
+    return max(0.0, INTERVAL_S - (now - last).total_seconds())
+
+
+async def _seconds_until_due() -> float:
+    return _due_in(await _last_run(), datetime.now(timezone.utc))
+
+
 async def run() -> None:
     asyncio.create_task(health.beat_loop("reconciler"))
     logger.info("Реконсилер запущен, интервал %d ч", INTERVAL_S // 3600)
     while True:
-        await asyncio.sleep(INTERVAL_S)
+        wait = await _seconds_until_due()
+        if wait:
+            logger.info("Реконсилер: следующая сверка через %d мин", int(wait // 60))
+            await asyncio.sleep(wait)
         try:
             stats = await reconcile_once()
+            await _remember_run(datetime.now(timezone.utc))
             if any(stats.values()):
                 logger.info("Реконсилер: %s", stats)
+            else:
+                logger.info("Реконсилер: расхождений нет")
         except Exception:
             logger.exception("Реконсилер упал")
+            # Время прогона не отмечаем: упавшая сверка не считается
+            # состоявшейся, иначе одна ошибка отложит следующую на сутки.
+            await asyncio.sleep(3600)
 
 
 # ── задача реестра ────────────────────────────────────────────────────────

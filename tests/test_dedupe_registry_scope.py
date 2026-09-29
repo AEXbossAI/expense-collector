@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -9,6 +9,8 @@ from app.db.models import DocKind, Source, Status
 from app.services import dedupe, registry
 from app.tasks import reconciler
 from app.services.validate import amount_present as _amount_present
+
+_now = datetime(2026, 9, 29, 12, 0, tzinfo=timezone.utc)
 
 
 # ── дедупликация ──────────────────────────────────────────────────────────
@@ -247,3 +249,29 @@ def test_пометка_проверить_попадает_в_примечан�
     row = _Row(status_reason="разложено вручную; проверить: сумма не найдена в тексте")
     text = registry.build_csv([row]).decode("utf-8-sig")
     assert "ПРОВЕРИТЬ: сумма не найдена в тексте" in text
+
+
+# ── когда реконсилер должен сверяться ─────────────────────────────────────
+
+
+def test_первая_сверка_не_ждёт_суток():
+    """Раньше цикл спал сутки ДО первой сверки, а время прогона нигде не
+    хранилось. Каждый перезапуск обнулял отсчёт: 28.09.2026 контейнер
+    пересобирали восемь раз, и сверка не случилась ни разу.
+
+    Файлы, положенные фин директором в папки руками, попадают в систему
+    только через реконсилер — значит несостоявшаяся сверка это тихая
+    потеря документа.
+    """
+    assert reconciler._due_in(None, _now) == 0.0
+
+
+def test_после_свежей_сверки_ждём_остаток_суток():
+    recent = _now - timedelta(hours=1)
+    assert reconciler._due_in(recent, _now) == pytest.approx(23 * 3600)
+
+
+def test_просроченная_сверка_запускается_сразу():
+    """Контейнер стоял неделю — ждать ещё сутки незачем."""
+    stale = _now - timedelta(days=7)
+    assert reconciler._due_in(stale, _now) == 0.0
