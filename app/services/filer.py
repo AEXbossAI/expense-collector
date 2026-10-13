@@ -71,6 +71,16 @@ async def file_document(
     dbx = get_dropbox()
     closed_note: str | None = None
 
+    # Файл уже в папке компании — туда его положил человек: система кладёт
+    # во входящие и сама из папок компании ничего не раскладывает. Тот же
+    # принцип, что у разборщика для ручных документов. 13.10.2026 подмена
+    # дубля без этой проверки вынесла два файла из подпапок банков в корень
+    # месяца и переименовала.
+    source = doc.dropbox_path
+    if source and in_company_folder(source, company) and await dbx.exists(source):
+        logger.info("Документ %s уже в папке компании, остаётся на месте: %s", doc.id, source)
+        return source, None
+
     if folder is None:
         effective = doc_date or doc.received_at.date()
         month = naming.month_folder(datetime(effective.year, effective.month, 1))
@@ -85,7 +95,6 @@ async def file_document(
 
     filename = target_filename(doc, vendor, amount, currency, doc_date)
     destination = f"{folder}/{filename}"
-    source = doc.dropbox_path
     if not source:
         raise RuntimeError(f"У документа {doc.id} нет пути в Dropbox")
 

@@ -212,6 +212,9 @@ class _FakeDropbox:
     async def ensure_folder(self, path):
         pass
 
+    async def exists(self, path):
+        return path not in self.missing
+
     async def move(self, src, dst):
         if src in self.missing:
             raise SourceMissing(src)
@@ -245,6 +248,27 @@ async def test_переложенный_руками_файл_остаётся_�
     assert dbx.moves == []
     intents = [o for o in session.added if isinstance(o, MoveIntent)]
     assert intents and all(i.completed_at is not None for i in intents)
+
+
+async def test_файл_в_подпапке_банка_не_перекладывается(monkeypatch):
+    """13.10.2026: подмена дубля 115 нашла файл в `+INVOICES WISE`, файл
+    существовал — и был вынесен в корень месяца с переименованием."""
+    doc = _doc(115, "h", Status.probable_duplicate, f"{WISE}/FOSHAN ALUCROWN 231 USD.pdf")
+    dbx = _FakeDropbox(missing=set())
+    session = _Session([])
+    path, _ = await _file(monkeypatch, session, doc, dbx, None)
+    assert path == f"{WISE}/FOSHAN ALUCROWN 231 USD.pdf"
+    assert dbx.moves == []
+    assert not [o for o in session.added if isinstance(o, MoveIntent)]
+
+
+async def test_файл_из_входящих_раскладывается_как_раньше(monkeypatch):
+    doc = _doc(5, "h", Status.new, "/_inbox/a.pdf")
+    dbx = _FakeDropbox(missing=set())
+    session = _Session([])
+    path, _ = await _file(monkeypatch, session, doc, dbx, None)
+    assert dbx.moves == [("/_inbox/a.pdf", path)]
+    assert path == f"{SEPT}/nodate_FOSHAN_231.00-USD_h.pdf"
 
 
 async def test_файл_найденный_во_входящих_перекладывается(monkeypatch):
