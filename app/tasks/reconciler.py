@@ -11,7 +11,7 @@ from app.core import health, naming
 from app.core.config import get_settings
 from app.db.models import Document, Kind, Source, Status, SyncCursor
 from app.db.session import session_scope
-from app.services import registry
+from app.services import alerts, registry
 from app.services.dropbox_client import get_dropbox
 
 logger = logging.getLogger(__name__)
@@ -37,40 +37,79 @@ def _path_in_scope(path: str) -> bool:
     return any(_month_in_scope(part) for part in path.split("/"))
 
 
-async def _list_company(company: str, root: str) -> dict[str, tuple[str, str]]:
-    """{content_hash: (путь, имя)} по всем папкам месяцев компании."""
+DELETED_REASON = "удалён человеком из папки компании"
+
+# Больше стольких «удалений» за одну сверку — почти наверняка сбой выборки,
+# а не человек. 10.10.2026 сверка не видела подпапок и сочла удалёнными
+# 51 документ разом; реестр сентября просел с 86 строк до 42.
+MAX_DELETIONS = 10
+
+
+def _collect(entries) -> dict[str, list[tuple[str, str]]]:
+    """{content_hash: [(путь, имя), ...]} по файлам месяца.
+
+    Список, а не одно значение: одинаковые копии (`x (1).pdf`, `x (2).pdf`)
+    дают один хеш. Словарь с одним значением оставлял случайную копию,
+    и документ каждый день «перемещался» между ними — 9.10.2026 таких
+    перемещений было 91.
+    """
+    found: dict[str, list[tuple[str, str]]] = {}
+    for entry in entries:
+        h = getattr(entry, "content_hash", None)
+        if h and entry.name not in SKIP_NAMES:
+            found.setdefault(h, []).append((entry.path_display, entry.name))
+    return found
+
+
+def _pick(current: str | None, copies: list[tuple[str, str]]) -> tuple[str, str]:
+    """Какую из одинаковых копий считать файлом документа.
+
+    Текущий путь, если он среди копий: документ никуда не двигался.
+    Иначе первая по алфавиту — детерминированно, чтобы следующая
+    сверка выбрала ту же.
+    """
+    if current:
+        for copy in copies:
+            if copy[0].lower() == current.lower():
+                return copy
+    return sorted(copies)[0]
+
+
+def _company_of(path: str, fallback: str | None) -> str | None:
+    return next(
+        (c for c, r in settings.dropbox_company_roots.items() if path.startswith(r)),
+        fallback,
+    )
+
+
+async def _list_company(company: str, root: str) -> dict[str, list[tuple[str, str]]] | None:
+    """{content_hash: [(путь, имя), ...]} по всем папкам месяцев компании,
+    включая подпапки внутри месяца. None — папку компании открыть не
+    удалось, и об её файлах сверка не знает ничего."""
     dbx = get_dropbox()
     loop = asyncio.get_running_loop()
-    found: dict[str, tuple[str, str]] = {}
+    found: dict[str, list[tuple[str, str]]] = {}
 
     try:
         years = await loop.run_in_executor(None, dbx._dbx.files_list_folder, root)
     except Exception as exc:
         logger.warning("Не открыть %s: %s", root, str(exc)[:80])
-        return found
+        return None
 
     for year in years.entries:
         if getattr(year, "size", None) is not None or not year.name.isdigit():
             continue
-        try:
-            months = await loop.run_in_executor(None, dbx._dbx.files_list_folder, year.path_display)
-        except Exception:
-            continue
+        # Падение листинга года или месяца роняет всю сверку: молча
+        # пропущенная папка выглядит как «все её файлы удалены».
+        months = await loop.run_in_executor(None, dbx._dbx.files_list_folder, year.path_display)
         for month in months.entries:
             if getattr(month, "size", None) is not None:
                 continue
             if not _month_in_scope(month.name):
                 continue
-            try:
-                files = await loop.run_in_executor(
-                    None, dbx._dbx.files_list_folder, month.path_display
-                )
-            except Exception:
-                continue
-            for entry in files.entries:
-                h = getattr(entry, "content_hash", None)
-                if h and entry.name not in SKIP_NAMES:
-                    found[h] = (entry.path_display, entry.name)
+            files = await dbx.list_files(month.path_display)
+            for h, copies in _collect(files).items():
+                found.setdefault(h, []).extend(copies)
     return found
 
 
@@ -87,25 +126,33 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
     а база подстраивается. Реконсилер сам ничего не перемещает и не
     удаляет.
     """
-    stats = {"новых": 0, "перемещено": 0, "удалено": 0, "снято_с_очереди": 0}
+    stats = {"новых": 0, "перемещено": 0, "удалено": 0, "снято_с_очереди": 0,
+             "восстановлено": 0}
 
-    in_dropbox: dict[str, tuple[str, str]] = {}
+    in_dropbox: dict[str, list[tuple[str, str]]] = {}
+    unlisted_roots: list[str] = []
     for company, root in settings.dropbox_company_roots.items():
-        for h, (path, name) in (await _list_company(company, root)).items():
-            in_dropbox[h] = (path, name)
+        listed = await _list_company(company, root)
+        if listed is None:
+            unlisted_roots.append(root)
+            continue
+        for h, copies in listed.items():
+            in_dropbox.setdefault(h, []).extend(copies)
 
     async with session_scope() as session:
         docs = (await session.execute(select(Document))).scalars().all()
         by_hash = {d.content_hash: d for d in docs if d.content_hash}
+        # Хеши, у которых уже есть живой документ. Восстанавливать второй
+        # на тот же файл нельзя — получится два расхода из одного.
+        active = {d.content_hash for d in docs
+                  if d.content_hash and d.status != Status.ignored}
 
         # 1. Файл есть в Dropbox, в базе нет — положил человек
-        for h, (path, name) in in_dropbox.items():
+        for h, copies in in_dropbox.items():
             if h in by_hash:
                 continue
-            company = next(
-                (c for c, r in settings.dropbox_company_roots.items() if path.startswith(r)),
-                None,
-            )
+            path, name = _pick(None, copies)
+            company = _company_of(path, None)
             if dry:
                 stats["новых"] += 1
                 logger.info("[сухой] завёл бы: %s", path)
@@ -128,11 +175,38 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
             )
             stats["новых"] += 1
 
-        # 2-4. Расхождения по уже известным документам
+        # 2-5. Расхождения по уже известным документам
+        to_delete: list[Document] = []
         for doc in docs:
             if not doc.content_hash:
                 continue
-            hit = in_dropbox.get(doc.content_hash)
+            copies = in_dropbox.get(doc.content_hash)
+            hit = _pick(doc.dropbox_path, copies) if copies else None
+
+            if doc.status == Status.ignored:
+                # Отброшенный документ за файлом не следует: его путь ни
+                # на что не влияет, а указывать на чужой живой файл опасно —
+                # удаление «лишнего экземпляра» снесло бы его.
+                #
+                # Исключение — наша же ошибочная пометка «удалён»: файл
+                # нашёлся, значит его не удаляли, а переложили.
+                if (
+                    hit
+                    and doc.status_reason == DELETED_REASON
+                    and doc.content_hash not in active
+                ):
+                    stats["восстановлено"] += 1
+                    if dry:
+                        logger.info("[сухой] восстановил бы %s -> %s", doc.id, hit[0])
+                        continue
+                    logger.info("Документ %s нашёлся, пометка «удалён» снята: %s",
+                                doc.id, hit[0])
+                    doc.dropbox_path = hit[0]
+                    doc.company = _company_of(hit[0], doc.company)
+                    doc.status = Status.filed
+                    doc.status_reason = "восстановлен сверкой: файл переложен человеком"
+                    active.add(doc.content_hash)
+                continue
 
             if hit and doc.status == Status.needs_review:
                 if dry:
@@ -152,10 +226,7 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
                     stats["перемещено"] += 1
                     logger.info("[сухой] отметил бы перемещение %s -> %s", doc.id, hit[0])
                     continue
-                new_company = next(
-                    (c for c, r in settings.dropbox_company_roots.items() if hit[0].startswith(r)),
-                    doc.company,
-                )
+                new_company = _company_of(hit[0], doc.company)
                 logger.info("Документ %s передвинут человеком: %s -> %s",
                             doc.id, doc.dropbox_path, hit[0])
                 doc.dropbox_path = hit[0]
@@ -173,15 +244,37 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
                 # проверки сухой прогон пометил бы удалёнными 4 корректно
                 # разложенных документа за август.
                 and _path_in_scope(doc.dropbox_path)
+                and not any(doc.dropbox_path.startswith(r) for r in unlisted_roots)
             ):
-                stats["удалено"] += 1
-                if dry:
-                    logger.info("[сухой] пометил бы удалённым %s (%s)", doc.id, doc.dropbox_path)
-                    continue
+                to_delete.append(doc)
+
+        stats["удалено"] = len(to_delete)
+        if dry:
+            for doc in to_delete:
+                logger.info("[сухой] пометил бы удалённым %s (%s)", doc.id, doc.dropbox_path)
+        elif _deletions_suspicious(len(to_delete)):
+            # Перемещения и восстановления выше применяются: они опираются
+            # на найденные файлы. Не применяются только удаления — они
+            # опираются на НЕнайденные, а выборка могла быть неполной.
+            logger.error("Сверка сочла удалёнными %d документов, пометка не применена: %s",
+                         len(to_delete), [d.id for d in to_delete])
+            await alerts.alert(
+                "reconcile-mass-delete",
+                f"Сверка не нашла в Dropbox {len(to_delete)} разложенных документов "
+                f"(порог {MAX_DELETIONS}). Удалёнными их НЕ пометила: похоже на сбой "
+                f"выборки, а не на ручное удаление. Документы: "
+                f"{', '.join(str(d.id) for d in to_delete[:30])}",
+            )
+        else:
+            for doc in to_delete:
                 doc.status = Status.ignored
-                doc.status_reason = "удалён человеком из папки компании"
+                doc.status_reason = DELETED_REASON
 
     return stats
+
+
+def _deletions_suspicious(count: int) -> bool:
+    return count > MAX_DELETIONS
 
 
 CURSOR_NAME = "reconcile_run"

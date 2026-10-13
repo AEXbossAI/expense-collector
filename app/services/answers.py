@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.models import Document, MondayProject, ProjectSource, RoutingAnswer, Status
 from app.services import dedupe, filer
+from app.services.dropbox_client import SourceMissing
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -35,6 +36,12 @@ async def _primary_of(session: AsyncSession, doc: Document) -> Document | None:
     if not match:
         return None
     return await session.get(Document, int(match.group(1)))
+
+
+def _same_file(a: Document, b: Document) -> bool:
+    if a.content_hash and a.content_hash == b.content_hash:
+        return True
+    return bool(a.dropbox_path) and (a.dropbox_path or "").lower() == (b.dropbox_path or "").lower()
 
 
 async def _record(session: AsyncSession, doc: Document, question: str,
@@ -188,6 +195,14 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
         if primary is not None and dedupe.prefer(doc, primary) is doc:
             logger.info("Дубль %s лучше основного %s, меняю местами", doc.id, primary.id)
             try:
+                # Лучший экземпляр встаёт на место основного, а не в корень
+                # месяца: фин директор раскладывает месяц по подпапкам банков.
+                primary_path = await filer.locate(primary)
+                folder = (
+                    primary_path.rsplit("/", 1)[0]
+                    if primary_path and filer.in_company_folder(primary_path, primary.company)
+                    else None
+                )
                 path, closed = await filer.file_document(
                     session, doc,
                     company=primary.company,
@@ -195,11 +210,25 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
                     amount=float(doc.amount) if doc.amount is not None else None,
                     currency=doc.currency,
                     doc_date=doc.doc_date,
+                    folder=folder,
                 )
+            except SourceMissing:
+                # Подменять нечем: файла лучшего экземпляра нет нигде. Ответ
+                # «один расход» от этого не меняется — остаётся основной.
+                # Раньше здесь был «попробуйте позже», фин директор жала
+                # кнопку шесть раз, и каждое нажатие оставляло подвисшее
+                # перемещение, про которое sweeper слал алерт раз в час.
+                logger.warning("Файла документа %s нет в Dropbox, основным остаётся %s",
+                               doc.id, primary.id)
+                path = None
             except Exception:
                 logger.exception("Не удалось заменить основной экземпляр %s на %s",
                                  primary.id, doc.id)
                 return 0, "Не получилось заменить экземпляр, попробуйте позже."
+        else:
+            path = None
+
+        if path is not None:
             doc.company = primary.company
             doc.dropbox_path = path
             doc.belongs_to_closed_month = closed
@@ -216,6 +245,12 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
         loser.status_reason = f"подтверждённый дубль: {loser.status_reason or ''}".strip()
         loser.resolved_by = who
         loser.resolved_at = datetime.now(timezone.utc)
+        if winner is not None and _same_file(loser, winner):
+            # Один и тот же файл под двумя записями: удалить «лишний»
+            # значит удалить единственный.
+            logger.info("Дубль %s и %s — один файл, удалять нечего", loser.id, winner.id)
+            loser.dropbox_path = None
+            return 1, "Понято, один расход."
         try:
             await filer.discard_ignored(loser)
             loser.dropbox_path = None

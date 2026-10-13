@@ -10,7 +10,7 @@ from app.core import naming
 from app.core.config import get_settings
 from app.db.models import Document, MonthState, MoveIntent
 from app.services import buffer
-from app.services.dropbox_client import get_dropbox
+from app.services.dropbox_client import SourceMissing, get_dropbox
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -54,24 +54,33 @@ async def file_document(
     amount: float | None,
     currency: str | None,
     doc_date: date | None,
+    folder: str | None = None,
 ) -> tuple[str, str | None]:
     """Перекладывает документ в папку компании и месяца.
+
+    `folder` задаёт папку явно — для подмены экземпляра дубля: лучший
+    файл встаёт туда, где лежал основной, в том числе в подпапку банка,
+    куда его разложил фин директор.
+
+    Если файла по записанному пути нет, он ищется по содержимому. Нашёлся
+    в папке той же компании — его туда положил человек, и файл остаётся
+    на месте. Не нашёлся нигде — `SourceMissing`.
 
     Возвращает (новый путь, пометка про закрытый месяц).
     """
     dbx = get_dropbox()
-    effective = doc_date or doc.received_at.date()
     closed_note: str | None = None
 
-    month = naming.month_folder(datetime(effective.year, effective.month, 1))
-    if await is_month_closed(session, company, month):
-        # Молча дописывать в сданный отчёт нельзя: доверие к реестру
-        # кончается на первом же случае. Кладём в текущий месяц с пометкой.
-        closed_note = month
-        effective = datetime.now(timezone.utc).date()
-        logger.info("Месяц %s закрыт, документ %s уходит в текущий", month, doc.id)
-
-    folder = naming.company_path(company, datetime(effective.year, effective.month, 1))
+    if folder is None:
+        effective = doc_date or doc.received_at.date()
+        month = naming.month_folder(datetime(effective.year, effective.month, 1))
+        if await is_month_closed(session, company, month):
+            # Молча дописывать в сданный отчёт нельзя: доверие к реестру
+            # кончается на первом же случае. Кладём в текущий месяц с пометкой.
+            closed_note = month
+            effective = datetime.now(timezone.utc).date()
+            logger.info("Месяц %s закрыт, документ %s уходит в текущий", month, doc.id)
+        folder = naming.company_path(company, datetime(effective.year, effective.month, 1))
     await dbx.ensure_folder(folder)
 
     filename = target_filename(doc, vendor, amount, currency, doc_date)
@@ -86,10 +95,67 @@ async def file_document(
     session.add(intent)
     await session.flush()
 
-    final = await dbx.move(source, destination)
+    try:
+        final = await dbx.move(source, destination)
+    except SourceMissing:
+        # Исход известен точно: move не случился. Намерение закрываем
+        # сразу — иначе sweeper будет слать алерт про него вечно.
+        intent.completed_at = datetime.now(timezone.utc)
+        found = await locate(doc)
+        if found is None:
+            raise
+        logger.info("Документ %s не по записанному пути, найден: %s", doc.id, found)
+        doc.dropbox_path = found
+        if in_company_folder(found, company):
+            # Из входящих в папку компании файл мог попасть только руками.
+            return found, closed_note
+        intent = MoveIntent(document_id=doc.id, from_path=found, to_path=destination)
+        session.add(intent)
+        await session.flush()
+        final = await dbx.move(found, destination)
 
     intent.completed_at = datetime.now(timezone.utc)
     return final, closed_note
+
+
+def in_company_folder(path: str, company: str) -> bool:
+    """Файл лежит в папке компании, а не во входящих. Если записанный
+    путь вёл не туда, значит файл разложил человек, и перекладывать его
+    по нашему соглашению об именах нельзя."""
+    root = settings.dropbox_company_roots.get(company)
+    return bool(root) and path.startswith(root + "/") and not path.startswith(
+        settings.dropbox_inbox_path
+    )
+
+
+async def locate(doc: Document) -> str | None:
+    """Где файл документа лежит на самом деле.
+
+    Записанный путь, если файл там. Иначе поиск по content_hash во входящих
+    и в папках месяцев всех компаний: фин директор перекладывает файлы
+    руками, а сверка узнаёт об этом только раз в сутки.
+    """
+    dbx = get_dropbox()
+    if doc.dropbox_path and await dbx.exists(doc.dropbox_path):
+        return doc.dropbox_path
+    if not doc.content_hash:
+        return None
+
+    from app.tasks import reconciler  # сверка импортирует сервисы, не наоборот
+
+    candidates: list[tuple[str, str]] = []
+    try:
+        inbox = await dbx.list_files(settings.dropbox_inbox_path)
+        candidates += reconciler._collect(inbox).get(doc.content_hash, [])
+    except Exception:
+        logger.warning("Не удалось просмотреть входящие при поиске документа %s", doc.id)
+    for company, root in settings.dropbox_company_roots.items():
+        listed = await reconciler._list_company(company, root)
+        if listed:
+            candidates += listed.get(doc.content_hash, [])
+    if not candidates:
+        return None
+    return reconciler._pick(doc.dropbox_path, candidates)[0]
 
 
 async def discard_ignored(doc: Document) -> None:

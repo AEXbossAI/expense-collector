@@ -26,21 +26,17 @@ async def _resolve(intent: MoveIntent) -> str:
     Транзакции между Dropbox и базой нет, поэтому после сбоя возможны
     два состояния: файл уже в цели (move прошёл, подтверждение — нет)
     либо ещё в источнике (move не прошёл). Различаем по факту.
+
+    Сетевой сбой — не «нигде»: exists() пробрасывает всё, кроме not_found,
+    и намерение доживёт до следующего прохода. Иначе закрытие «потерянных»
+    намерений выбрасывало бы следы настоящих подвисших перемещений.
     """
     dbx = get_dropbox()
-    loop = asyncio.get_running_loop()
-
-    try:
-        await loop.run_in_executor(None, dbx._dbx.files_get_metadata, intent.to_path)
+    if await dbx.exists(intent.to_path):
         return "в цели"
-    except Exception:
-        pass
-
-    try:
-        await loop.run_in_executor(None, dbx._dbx.files_get_metadata, intent.from_path)
+    if await dbx.exists(intent.from_path):
         return "в источнике"
-    except Exception:
-        return "нигде"
+    return "нигде"
 
 
 async def sweep_once() -> dict[str, int]:
@@ -57,6 +53,7 @@ async def sweep_once() -> dict[str, int]:
             )
         ).scalars().all()
 
+        lost_docs: set[int] = set()
         for intent in stale:
             where = await _resolve(intent)
             doc = await session.get(Document, intent.document_id)
@@ -87,13 +84,25 @@ async def sweep_once() -> dict[str, int]:
             else:
                 # Файла нет ни там, ни там. Сами ничего не восстанавливаем:
                 # это ровно тот случай, когда нужен человек.
+                #
+                # Сообщаем один раз и закрываем намерение. Раньше оно
+                # оставалось открытым, а дедуп алертов держал ключ час и
+                # жил в памяти — 13.10.2026 шесть намерений по документу 115
+                # давали шесть одинаковых сообщений каждый час без конца.
+                # Если файл просто переложили руками, сверка найдёт его по
+                # содержимому и сама поправит путь.
                 intent.attempts += 1
+                intent.completed_at = datetime.now(timezone.utc)
                 stats["потеряно"] += 1
-                await alerts.alert(
-                    f"move-lost:{intent.id}",
-                    f"Документ {intent.document_id} не найден ни в {intent.from_path}, "
-                    f"ни в {intent.to_path}. Нужна проверка вручную.",
-                )
+                if intent.document_id not in lost_docs:
+                    lost_docs.add(intent.document_id)
+                    await alerts.alert(
+                        f"move-lost:doc{intent.document_id}",
+                        f"Документ {intent.document_id} не найден ни в {intent.from_path}, "
+                        f"ни в {intent.to_path}. Если его переложили руками, сверка "
+                        f"найдёт файл сама; если удалили — нужна проверка вручную. "
+                        f"Больше об этом перемещении сообщений не будет.",
+                    )
 
     return stats
 

@@ -26,6 +26,15 @@ class DropboxAuthBroken(Exception):
     нужен человек — поэтому отделено от сетевых сбоев."""
 
 
+class SourceMissing(Exception):
+    """Перемещать нечего: файла нет ни в источнике, ни в цели.
+
+    Отделено от прочих ApiError, потому что исход здесь известен точно —
+    move не случился и не случится. Намерение перемещения можно закрывать
+    сразу, а не оставлять sweeper'у.
+    """
+
+
 class DropboxClient:
     def __init__(self) -> None:
         # Токен командный (team-scoped), тот же, что у OrlandaBot. Такой токен
@@ -159,6 +168,8 @@ class DropboxClient:
                     return meta.path_display
                 except Exception:
                     pass
+            if "from_lookup" in text and "not_found" in text:
+                raise SourceMissing(src) from exc
             raise
 
     async def move(self, src: str, dst: str) -> str:
@@ -169,6 +180,37 @@ class DropboxClient:
             return await loop.run_in_executor(None, self._move_sync, src, dst)
         except AuthError as exc:
             raise DropboxAuthBroken(str(exc)) from exc
+
+    def _exists_sync(self, path: str) -> bool:
+        try:
+            self._dbx.files_get_metadata(path)
+            return True
+        except ApiError as exc:
+            if "not_found" in str(exc):
+                return False
+            raise
+
+    async def exists(self, path: str) -> bool:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._exists_sync, path)
+
+    def _list_files_sync(self, path: str) -> list:
+        """Все файлы под папкой, включая подпапки, со всеми страницами.
+
+        Фин директор раскладывает месяц по подпапкам банков
+        (`+INVOICES WISE`, `+invoices Wamo`). Плоский list_folder их не
+        видел, и 10.10.2026 сверка сочла удалёнными 51 документ.
+        """
+        res = self._dbx.files_list_folder(path, recursive=True)
+        entries = list(res.entries)
+        while res.has_more:
+            res = self._dbx.files_list_folder_continue(res.cursor)
+            entries.extend(res.entries)
+        return [e for e in entries if isinstance(e, dropbox.files.FileMetadata)]
+
+    async def list_files(self, path: str) -> list:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._list_files_sync, path)
 
     def _delete_sync(self, path: str) -> None:
         self._dbx.files_delete_v2(path)
