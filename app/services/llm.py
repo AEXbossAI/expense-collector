@@ -214,6 +214,41 @@ async def extract_fields(
     return response.parsed_output
 
 
+class PrintedTotal(BaseModel):
+    total_as_printed: str | None = Field(
+        default=None,
+        description="Итог к оплате ровно так, как он напечатан: те же цифры и "
+        "разделители, без валюты. null, если итога не видно.",
+    )
+
+
+async def read_total(data: bytes, mime_type: str) -> str | None:
+    """Второе, независимое чтение итога с фото или скана.
+
+    У картинки нет текстового слоя, и сверить сумму разбора с текстом
+    документа нечем: каждое фото чека из чата уходило фин директору
+    вопросом. Это чтение не видит первого разбора и только переписывает
+    итог как напечатан; сумма принимается, если два чтения совпали.
+    """
+    response = await get_client().messages.parse(
+        model=settings.parser_model,
+        max_tokens=1500,
+        system=(
+            "Перепиши из документа итоговую сумму к оплате — ровно как она "
+            "напечатана, цифра в цифру. Не считай и не округляй. Если итога "
+            "не видно или он нечитаем, верни null."
+        ),
+        thinking={"type": "adaptive"},
+        output_config={"effort": "low"},
+        messages=[{"role": "user", "content": [
+            _doc_block(data, mime_type),
+            {"type": "text", "text": "Итог к оплате?"},
+        ]}],
+        output_format=PrintedTotal,
+    )
+    return response.parsed_output.total_as_printed
+
+
 class TextOnlyVerdict(BaseModel):
     """Классификация сообщения из чата без файла."""
 

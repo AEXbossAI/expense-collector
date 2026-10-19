@@ -17,6 +17,12 @@ MIN_TEXT_CHARS = 100
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/heic"}
 
 
+def vision_mime(mime_type: str | None) -> str | None:
+    """Тип, который модель примет как файл, или None."""
+    mime_type = (mime_type or "").lower()
+    return mime_type if mime_type == "application/pdf" or mime_type in IMAGE_TYPES else None
+
+
 def _pdf_text_sync(data: bytes) -> str:
     try:
         import pdfplumber

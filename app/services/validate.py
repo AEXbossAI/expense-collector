@@ -21,6 +21,9 @@ def amount_present(amount: float | None, text: str | None) -> bool:
         f"{amount:.2f}".replace(".", ","),
         f"{amount:,.2f}",
         f"{amount:,.2f}".replace(",", " "),
+        # европейская запись: 1.234,56 и 1 234,56
+        f"{amount:,.2f}".translate(str.maketrans(",.", ".,")),
+        f"{amount:,.2f}".replace(",", " ").replace(".", ","),
         f"{amount:.0f}" if amount == int(amount) else None,
     }
     haystack = re.sub(r"\s+", " ", text)

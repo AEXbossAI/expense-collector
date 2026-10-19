@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import mimetypes
 import re
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app.core import health
+from app.core import health, naming
 from app.core.config import get_settings
 from app.core.text import clean
 from app.db.models import (
@@ -19,6 +20,7 @@ from app.db.models import (
     Document,
     Kind,
     ParseAttempt,
+    PendingUpload,
     ProjectSource,
     RoutingAnswer,
     Source,
@@ -27,10 +29,12 @@ from app.db.models import (
 from app.db.session import session_scope
 from app.services import (
     alerts,
+    buffer,
     company,
     dedupe,
     extract,
     filer,
+    links,
     llm,
     projects,
     rules,
@@ -79,7 +83,74 @@ async def _log_attempt(session, doc_id: int, text: str | None, model: str | None
 # ── разбор сообщения из чата без файла ────────────────────────────────────
 
 
+async def _spawn_from_links(session, doc: Document) -> bool:
+    """Ссылка на электронный чек становится документом-файлом, как будто
+    чек прислали файлом: буфер, выгрузка во входящие, разбор следующим
+    циклом. Само сообщение закрывается ссылкой на новый документ."""
+    for url in links.find_urls(doc.raw_caption):
+        got = await links.fetch_receipt(url)
+        if got is None:
+            continue
+        key = "link:" + hashlib.sha256(url.encode()).hexdigest()[:40]
+        existing = (
+            await session.execute(
+                select(Document.id).where(Document.source == doc.source,
+                                          Document.source_key == key)
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            local = buffer.write(doc.source.value, got.name, got.data)
+            new = Document(
+                source=doc.source,
+                source_key=key,
+                kind=Kind.file,
+                original_name=buffer.safe_name(got.name),
+                local_path=str(local),
+                size_bytes=len(got.data),
+                mime_type=got.mime,
+                raw_caption=doc.raw_caption,
+                sender=doc.sender,
+                received_at=doc.received_at,
+                company=doc.company,
+                status=Status.new,
+            )
+            session.add(new)
+            await session.flush()
+            session.add(
+                PendingUpload(
+                    document_id=new.id,
+                    local_path=str(local),
+                    target_path=naming.inbox_path(doc.received_at, f"{new.id}_{new.original_name}"),
+                )
+            )
+            existing = new.id
+            logger.info("Документ %s: чек по ссылке скачан документом %s (%s)",
+                        doc.id, new.id, got.name)
+        doc.status = Status.ignored
+        doc.status_reason = f"ссылка на чек, файл — документ {existing}"
+        doc.resolved_at = datetime.now(timezone.utc)
+        return True
+    return False
+
+
 async def _handle_text_only(session, doc: Document) -> None:
+    try:
+        if await _spawn_from_links(session, doc):
+            return
+    except links.LinkUnavailable as exc:
+        tried = len(
+            (
+                await session.execute(
+                    select(ParseAttempt.id).where(ParseAttempt.document_id == doc.id)
+                )
+            ).scalars().all()
+        )
+        if tried + 1 < settings.parser_max_attempts:
+            raise
+        # Касса так и не ответила. Дальше сообщение разбирается как текст,
+        # чтобы не застрять в failed; ссылка остаётся в журнале попыток.
+        logger.warning("Документ %s: ссылка недоступна, разбираю как текст: %s", doc.id, exc)
+
     verdict = await llm.classify_text(doc.raw_caption or "")
     await _log_attempt(session, doc.id, doc.raw_caption, settings.parser_model,
                        verdict.model_dump_json(), None)
@@ -194,7 +265,7 @@ async def _handle_file(session, doc: Document) -> None:
     await apply_project(session, doc, parsed.project_hint, text)
 
     problems: list[str] = []
-    if not validate.amount_present(parsed.amount, text):
+    if not await _amount_confirmed(doc, parsed.amount, text, data, mime):
         problems.append("сумма не найдена в тексте документа")
     if parsed.doc_date is None:
         problems.append("дата документа не распознана")
@@ -285,6 +356,26 @@ async def _handle_file(session, doc: Document) -> None:
     doc.resolved_at = datetime.now(timezone.utc)
     logger.info("Документ %s разложен: %s%s", doc.id, path,
                 " (по умолчанию)" if defaulted else "")
+
+
+async def _amount_confirmed(doc: Document, amount: float | None, text: str | None,
+                            data: bytes, mime: str | None) -> bool:
+    """Сумма разбора подтверждена документом.
+
+    Сначала дословно по текстовому слою. Нет текста или сумма в нём не
+    нашлась — второе независимое чтение итога с самого файла: у фото чека
+    текста нет вовсе, и без этого каждое фото из чата уходило вопросом.
+    """
+    if validate.amount_present(amount, text):
+        return True
+    vmime = extract.vision_mime(mime)
+    if amount is None or vmime is None:
+        return False
+    printed = await llm.read_total(data, vmime)
+    ok = validate.amount_present(amount, printed)
+    logger.info("Документ %s: сумма %s, второе чтение %r — %s",
+                doc.id, amount, printed, "совпало" if ok else "не совпало")
+    return ok
 
 
 def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> None:
