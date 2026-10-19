@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Document, MondayProject, ProjectSource, RoutingAnswer, Status
+from app.db.models import Document, Kind, MondayProject, ProjectSource, RoutingAnswer, Status
 from app.services import dedupe, filer
 from app.services.dropbox_client import SourceMissing
 
@@ -72,9 +72,31 @@ async def answer_company(session: AsyncSession, doc_id: int, company: str,
 
     docs = await _group(session, doc)
     handled = 0
+    without_amount = 0
 
     for d in docs:
         await _record(session, d, "company", company, who)
+
+        if d.kind == Kind.text_only and company != "skip":
+            # Сообщение из чата: файла нет, перекладывать нечего. Раньше
+            # ответ уходил в раскладку, та падала на «нет пути в Dropbox»,
+            # документ оставался в очереди, и вопрос приходил каждый день.
+            d.company = company
+            d.resolved_by = who
+            d.resolved_at = datetime.now(timezone.utc)
+            if d.amount is not None:
+                d.status = Status.filed
+                d.status_reason = "распределено фин директором"
+            else:
+                # Строку с пустой суммой в реестр не заводим (решение
+                # владельца). Такие сообщения — подписи к чеку, пришедшие
+                # отдельным сообщением: «Карта компания бензин» через 30
+                # секунд после фото чека ESSO. Сам чек учтён своим документом.
+                d.status = Status.ignored
+                d.status_reason = f"сообщение без файла и без суммы, фин директор: {company}"
+                without_amount += 1
+            handled += 1
+            continue
 
         if company == "skip":
             d.status = Status.ignored
@@ -114,6 +136,8 @@ async def answer_company(session: AsyncSession, doc_id: int, company: str,
 
     if company == "skip":
         return handled, f"Не распределяем. Документов: {handled}."
+    if without_amount and without_amount == handled:
+        return handled, "Принято. Суммы в сообщении нет, в реестр оно не идёт: чек учитывается своим документом."
     title = {"orlanda_engineering": "эстонскую", "orlanda_israel": "израильскую"}.get(company, company)
     return handled, f"Отнесено на {title} компанию. Документов: {handled}."
 

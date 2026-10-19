@@ -37,26 +37,12 @@ async def finance_chat_id() -> int | None:
         return None
 
 
-def keyboard(
-    item: review.QueueItem, projects: list[tuple[int, str]] | None = None
-) -> InlineKeyboardMarkup:
+def keyboard(item: review.QueueItem) -> InlineKeyboardMarkup:
     if item.kind == "duplicate":
         buttons = [
             InlineKeyboardButton(text="Один расход", callback_data=f"dup:same:{item.document_ids[0]}"),
             InlineKeyboardButton(text="Разные", callback_data=f"dup:diff:{item.document_ids[0]}"),
         ]
-    elif item.kind == "project":
-        # Проекты из недавних расходов, а не все 380: в дайджесте нужен
-        # короткий список того, что реально в работе. «Общие расходы» —
-        # полноценный ответ, а не отказ: он закрывает вопрос навсегда.
-        doc_id = item.document_ids[0]
-        buttons = [
-            InlineKeyboardButton(text=name[:40], callback_data=f"pr:{pid}:{doc_id}")
-            for pid, name in (projects or [])
-        ]
-        buttons.append(
-            InlineKeyboardButton(text="Общие расходы", callback_data=f"pr:none:{doc_id}")
-        )
     else:
         buttons = [
             InlineKeyboardButton(text="Эстонская", callback_data=f"co:orlanda_engineering:{item.document_ids[0]}"),
@@ -78,7 +64,6 @@ async def send_digest(bot: Bot, *, force: bool = False) -> int:
 
     async with session_scope() as session:
         items = await review.build(session)
-        projects = await review.recent_projects(session)
 
     if not items:
         if force:
@@ -91,7 +76,7 @@ async def send_digest(bot: Bot, *, force: bool = False) -> int:
         await bot.send_message(
             chat_id,
             f"<b>{n}. {item.title}</b> — {amount}",
-            reply_markup=keyboard(item, projects),
+            reply_markup=keyboard(item),
             parse_mode="HTML",
         )
     logger.info("Дайджест отправлен: %d вопросов", len(items))
