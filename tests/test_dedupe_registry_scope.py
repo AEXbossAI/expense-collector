@@ -266,12 +266,12 @@ def test_первая_сверка_не_ждёт_суток():
     assert reconciler._due_in(None, _now) == 0.0
 
 
-def test_после_свежей_сверки_ждём_остаток_суток():
+def test_после_свежей_сверки_ждём_остаток_интервала():
     recent = _now - timedelta(hours=1)
-    assert reconciler._due_in(recent, _now) == pytest.approx(23 * 3600)
+    assert reconciler._due_in(recent, _now) == pytest.approx(reconciler.INTERVAL_S - 3600)
 
 
 def test_просроченная_сверка_запускается_сразу():
-    """Контейнер стоял неделю — ждать ещё сутки незачем."""
+    """Контейнер стоял неделю — ждать ещё интервал незачем."""
     stale = _now - timedelta(days=7)
     assert reconciler._due_in(stale, _now) == 0.0

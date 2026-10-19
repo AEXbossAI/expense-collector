@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from functools import lru_cache
 from pathlib import Path
@@ -19,6 +20,17 @@ settings = get_settings()
 # а пути у нас кириллические) и сам разбирается с PathRoot.
 # Референс: orlandabot/app/services/dropbox_client.py:44-53
 CHUNK_THRESHOLD = 140 * 1024 * 1024
+_HASH_BLOCK = 4 * 1024 * 1024
+
+
+def content_hash(data: bytes) -> str:
+    """content_hash Dropbox: SHA-256 от склейки SHA-256 блоков по 4 МБ.
+    Позволяет не перезаливать файл с тем же содержимым."""
+    blocks = b"".join(
+        hashlib.sha256(data[i:i + _HASH_BLOCK]).digest()
+        for i in range(0, len(data), _HASH_BLOCK)
+    )
+    return hashlib.sha256(blocks).hexdigest()
 
 
 class DropboxAuthBroken(Exception):
@@ -194,6 +206,19 @@ class DropboxClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._exists_sync, path)
 
+    def _hash_of_sync(self, path: str) -> str | None:
+        try:
+            return getattr(self._dbx.files_get_metadata(path), "content_hash", None)
+        except ApiError as exc:
+            if "not_found" in str(exc):
+                return None
+            raise
+
+    async def hash_of(self, path: str) -> str | None:
+        """content_hash файла по пути; None — файла нет."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._hash_of_sync, path)
+
     def _list_files_sync(self, path: str) -> list:
         """Все файлы под папкой, включая подпапки, со всеми страницами.
 
@@ -212,19 +237,10 @@ class DropboxClient:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._list_files_sync, path)
 
-    def _delete_sync(self, path: str) -> None:
-        self._dbx.files_delete_v2(path)
-
-    async def delete(self, path: str) -> None:
-        """Используется только для status=ignored: рассылки, отрендеренные
-        из HTML-тела, не должны копиться в инбоксе мегабайтами."""
-        loop = asyncio.get_running_loop()
-        try:
-            await loop.run_in_executor(None, self._delete_sync, path)
-        except ApiError as exc:
-            if "not_found" in str(exc):
-                return
-            raise
+    # Метода удаления нет намеренно. До 19.10.2026 он был «только для
+    # инбокса», но вызывался по любому пути и снёс из папок компаний файлы,
+    # положенные фин директором (документы 71 и 187). Отброшенное теперь
+    # откладывается в `_inbox/_ignored` — см. filer.set_aside.
 
 
 @lru_cache

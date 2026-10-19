@@ -8,7 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import Document, Kind, MondayProject, ProjectSource, RoutingAnswer, Status
+from app.db.models import (
+    Document,
+    Kind,
+    MondayProject,
+    ProjectSource,
+    RoutingAnswer,
+    Source,
+    Status,
+)
 from app.services import dedupe, filer
 from app.services.dropbox_client import SourceMissing
 
@@ -104,10 +112,9 @@ async def answer_company(session: AsyncSession, doc_id: int, company: str,
             d.resolved_by = who
             d.resolved_at = datetime.now(timezone.utc)
             try:
-                await filer.discard_ignored(d)
-                d.dropbox_path = None
+                d.dropbox_path = await filer.set_aside(d)
             except Exception:
-                logger.exception("Не удалось удалить файл документа %s из _inbox", d.id)
+                logger.exception("Не удалось отложить файл документа %s", d.id)
             handled += 1
             continue
 
@@ -206,17 +213,33 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
     await _record(session, doc, "duplicate", "same" if same else "different", who)
 
     if same:
-        # Побеждает не тот, кто разобрался первым, а лучший артефакт:
-        # PDF с текстовым слоем против фотографии с бликами и обрезанными
-        # краями. Без этого first-write-wins оставляет худшую копию.
+        # Побеждает не тот, кто разобрался первым, а лучший артефакт.
+        # Файл фин директора лучше любого привезённого системой (решение
+        # владельца 19.10.2026); среди равных — PDF с текстовым слоем против
+        # фотографии с бликами. Без этого first-write-wins оставляет худшую копию.
         #
         # Подмена — это не обмен статусами: файл победителя лежит в _inbox,
         # файл проигравшего в папке компании. Их надо реально переложить,
-        # иначе в базе будет одно, а в Dropbox другое.
+        # иначе в базе будет одно, а в Dropbox другое. Исключение — файл
+        # фин директора: он остаётся там, где она его положила, под её именем.
         primary = await _primary_of(session, doc)
         loser, winner = doc, primary
 
-        if primary is not None and dedupe.prefer(doc, primary) is doc:
+        if primary is not None and dedupe.prefer(doc, primary) is doc and doc.source == Source.manual:
+            logger.info("Дубль %s положен фин директором, основной %s уступает", doc.id, primary.id)
+            found = await filer.locate(doc)
+            if found is not None:
+                doc.dropbox_path = found
+                doc.status = Status.filed
+                doc.status_reason = "подтверждён человеком как основной экземпляр (положен вручную)"
+                doc.resolved_by = who
+                doc.resolved_at = datetime.now(timezone.utc)
+                loser, winner = primary, doc
+            else:
+                logger.warning("Файла документа %s нет в Dropbox, основным остаётся %s",
+                               doc.id, primary.id)
+            path = None
+        elif primary is not None and dedupe.prefer(doc, primary) is doc:
             logger.info("Дубль %s лучше основного %s, меняю местами", doc.id, primary.id)
             try:
                 # Лучший экземпляр встаёт на место основного, а не в корень
@@ -270,17 +293,20 @@ async def answer_duplicate(session: AsyncSession, doc_id: int, same: bool,
         loser.resolved_by = who
         loser.resolved_at = datetime.now(timezone.utc)
         if winner is not None and _same_file(loser, winner):
-            # Один и тот же файл под двумя записями: удалить «лишний»
-            # значит удалить единственный.
-            logger.info("Дубль %s и %s — один файл, удалять нечего", loser.id, winner.id)
+            # Один и тот же файл под двумя записями: отложить «лишний»
+            # значит убрать единственный.
+            logger.info("Дубль %s и %s — один файл, убирать нечего", loser.id, winner.id)
             loser.dropbox_path = None
             return 1, "Понято, один расход."
+        if loser.source == Source.manual:
+            # Оба экземпляра положены фин директором: её файлы система не
+            # трогает, второй остаётся в папке, но в реестр не входит.
+            return 1, "Понято, один расход. Второй файл остался в папке, в реестр он не входит."
         try:
-            await filer.discard_ignored(loser)
-            loser.dropbox_path = None
+            loser.dropbox_path = await filer.set_aside(loser)
         except Exception:
-            logger.exception("Не удалось удалить лишний экземпляр %s", loser.id)
-        return 1, "Понято, один расход. Лишний экземпляр убран."
+            logger.exception("Не удалось отложить лишний экземпляр %s", loser.id)
+        return 1, "Понято, один расход. Лишний экземпляр отложен в _inbox/_ignored."
 
     # Разные расходы — документ идёт на обычную раскладку
     doc.status = Status.new

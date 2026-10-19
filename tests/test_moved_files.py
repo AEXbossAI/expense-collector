@@ -163,7 +163,7 @@ async def test_не_восстанавливается_второй_докуме
 
 async def test_отброшенный_дубль_не_следует_за_файлом(monkeypatch, alerts_sent):
     """Иначе путь подтверждённого дубля укажет на живой файл основного,
-    и удаление «лишнего экземпляра» снесёт единственный."""
+    и откладывание «лишнего экземпляра» унесёт единственный."""
     dupe = _doc(7, "h", Status.ignored, None, "подтверждённый дубль: похож на документ 6")
     await _reconcile(monkeypatch, [dupe], [_entry(f"{SEPT}/a.pdf", "h")])
     assert dupe.dropbox_path is None
@@ -312,11 +312,12 @@ async def test_один_расход_без_файла_лучшего_экзем
 
     async def _discard(d):
         discarded.append(d.id)
+        return None
 
     monkeypatch.setattr(answers.dedupe, "prefer", lambda a, b: a)
     monkeypatch.setattr(filer, "locate", _locate)
     monkeypatch.setattr(filer, "file_document", _file_document)
-    monkeypatch.setattr(filer, "discard_ignored", _discard)
+    monkeypatch.setattr(filer, "set_aside", _discard)
 
     n, text = await answers.answer_duplicate(session, 115, True, "elena")
     assert n == 1
@@ -341,12 +342,12 @@ async def test_лучший_экземпляр_встаёт_в_подпапку_
         return f"{kw['folder']}/new.pdf", None
 
     async def _discard(d):
-        pass
+        return None
 
     monkeypatch.setattr(answers.dedupe, "prefer", lambda a, b: a)
     monkeypatch.setattr(filer, "locate", _locate)
     monkeypatch.setattr(filer, "file_document", _file_document)
-    monkeypatch.setattr(filer, "discard_ignored", _discard)
+    monkeypatch.setattr(filer, "set_aside", _discard)
 
     await answers.answer_duplicate(session, 115, True, "elena")
     assert seen["folder"] == WISE
@@ -354,7 +355,7 @@ async def test_лучший_экземпляр_встаёт_в_подпапку_
     assert primary.status == Status.ignored
 
 
-async def test_один_файл_под_двумя_записями_не_удаляется(monkeypatch):
+async def test_один_файл_под_двумя_записями_не_откладывается(monkeypatch):
     primary = _doc(29, "h", Status.filed, f"{WISE}/a.pdf")
     dupe = _doc(115, "h", Status.probable_duplicate, f"{WISE}/a.pdf",
                 "похож на документ 29 (a.pdf)")
@@ -363,9 +364,10 @@ async def test_один_файл_под_двумя_записями_не_уда�
 
     async def _discard(d):
         discarded.append(d.id)
+        return None
 
     monkeypatch.setattr(answers.dedupe, "prefer", lambda a, b: b)
-    monkeypatch.setattr(filer, "discard_ignored", _discard)
+    monkeypatch.setattr(filer, "set_aside", _discard)
 
     await answers.answer_duplicate(session, 115, True, "elena")
     assert discarded == []

@@ -21,6 +21,27 @@ def month_folder(when: datetime) -> str:
     return f"{_MONTHS_EN[when.month - 1]}_{when.year}"
 
 
+def is_month_folder(name: str) -> bool:
+    """`September_2026` — да, `+INVOICES WISE` и `2026` — нет."""
+    parts = name.split("_")
+    return len(parts) == 2 and parts[0] in _MONTHS_EN and parts[1].isdigit()
+
+
+def month_of_path(path: str, root: str) -> str | None:
+    """Папка месяца, в которой лежит файл: `<корень>/<год>/<Месяц_Год>/...`.
+
+    Подпапки внутри месяца (`+INVOICES WISE`) не мешают: месяц — второй
+    уровень под корнем компании. Путь вне корня или вне папки месяца — None.
+    """
+    prefix = root.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return None
+    rel = path[len(prefix):].split("/")
+    if len(rel) >= 3 and rel[0].isdigit() and is_month_folder(rel[1]):
+        return rel[1]
+    return None
+
+
 def company_path(company: str, when: datetime) -> str:
     """Целевая папка документа: <корень компании>/<год>/<Месяц_Год>.
 

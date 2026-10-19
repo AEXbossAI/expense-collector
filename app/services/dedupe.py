@@ -9,7 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import DocKind, Document, Status
+from app.db.models import DocKind, Document, Source, Status
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -151,7 +151,20 @@ def rank(doc: Document) -> tuple[int, int, int]:
 
 
 def prefer(a: Document, b: Document) -> Document:
-    """Какой артефакт оставить основным при подтверждённом дубле."""
+    """Какой артефакт оставить основным при подтверждённом дубле.
+
+    Файл, положенный фин директором, по умолчанию лучше привезённого
+    системой (решение владельца 19.10.2026): она выбрала именно его и
+    назвала по-своему. Качество артефакта решает только между равными.
+
+    В `rank` это намеренно не внесено: по нему выбирается представитель
+    группы на доске, и смена ранга у старых групп завела бы вторую строку
+    на тот же расход.
+    """
+    a_manual = getattr(a, "source", None) == Source.manual
+    b_manual = getattr(b, "source", None) == Source.manual
+    if a_manual != b_manual:
+        return a if a_manual else b
     return a if rank(a) >= rank(b) else b
 
 

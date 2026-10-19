@@ -17,7 +17,10 @@ from app.services.dropbox_client import get_dropbox
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-INTERVAL_S = 24 * 3600
+# Раз в сутки — слишком редко: файл, положенный фин директором утром,
+# появлялся в реестре только назавтра. Сверка только читает листинг
+# Dropbox, поэтому три часа ей не в тягость.
+INTERVAL_S = 3 * 3600
 SKIP_NAMES = {settings.registry_filename}
 
 _MONTH_NUM = {m: i + 1 for i, m in enumerate(naming._MONTHS_EN)}
@@ -25,10 +28,10 @@ _MONTH_NUM = {m: i + 1 for i, m in enumerate(naming._MONTHS_EN)}
 
 def _month_in_scope(folder_name: str) -> bool:
     """Папки раньше RECONCILE_FROM не трогаем совсем."""
-    parts = folder_name.split("_")
-    if len(parts) != 2 or parts[0] not in _MONTH_NUM or not parts[1].isdigit():
+    if not naming.is_month_folder(folder_name):
         return False
-    key = f"{int(parts[1]):04d}-{_MONTH_NUM[parts[0]]:02d}"
+    name, year = folder_name.split("_")
+    key = f"{int(year):04d}-{_MONTH_NUM[name]:02d}"
     return key >= settings.reconcile_from
 
 
@@ -38,6 +41,23 @@ def _path_in_scope(path: str) -> bool:
 
 
 DELETED_REASON = "удалён человеком из папки компании"
+REVIVED_REASON = "файл лежит в папке компании, ранее отброшен моделью: разбирается заново"
+
+
+def _rejected_by_bot(doc: Document) -> bool:
+    """Документ отброшен решением системы, а не человека.
+
+    Такое решение не закрывает файл навсегда: если тот же файл лежит в
+    папке компании, его туда положила фин директор, и её решение сильнее.
+    Решения человека — подтверждённый дубль, «не распределяем» — остаются
+    в силе. Пометка «удалён» разбирается отдельной веткой восстановления.
+    """
+    return (
+        doc.status == Status.ignored
+        and doc.resolved_by is None
+        and doc.status_reason != DELETED_REASON
+        and not (doc.status_reason or "").startswith("подтверждённый дубль")
+    )
 
 # Больше стольких «удалений» за одну сверку — почти наверняка сбой выборки,
 # а не человек. 10.10.2026 сверка не видела подпапок и сочла удалёнными
@@ -127,7 +147,7 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
     удаляет.
     """
     stats = {"новых": 0, "перемещено": 0, "удалено": 0, "снято_с_очереди": 0,
-             "восстановлено": 0}
+             "восстановлено": 0, "возвращено": 0}
 
     in_dropbox: dict[str, list[tuple[str, str]]] = {}
     unlisted_roots: list[str] = []
@@ -141,22 +161,44 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
 
     async with session_scope() as session:
         docs = (await session.execute(select(Document))).scalars().all()
-        by_hash = {d.content_hash: d for d in docs if d.content_hash}
+        by_hash: dict[str, list[Document]] = {}
+        for d in docs:
+            if d.content_hash:
+                by_hash.setdefault(d.content_hash, []).append(d)
         # Хеши, у которых уже есть живой документ. Восстанавливать второй
         # на тот же файл нельзя — получится два расхода из одного.
         active = {d.content_hash for d in docs
                   if d.content_hash and d.status != Status.ignored}
 
-        # 1. Файл есть в Dropbox, в базе нет — положил человек
+        # 1. Файл есть в Dropbox, в базе нет — положил человек. Либо есть,
+        # но только отброшенный моделью: человек с ней не согласен.
         for h, copies in in_dropbox.items():
-            if h in by_hash:
+            known = by_hash.get(h, [])
+            if any(not _rejected_by_bot(d) for d in known):
                 continue
             path, name = _pick(None, copies)
             company = _company_of(path, None)
+            # Ручной документ на этот файл уже есть — возвращаем его же:
+            # второй с тем же (source, source_key, имя) база не примет.
+            revived = next((d for d in known if d.source == Source.manual), None)
+            if revived is not None:
+                stats["возвращено"] += 1
+                if dry:
+                    logger.info("[сухой] вернул бы в разбор %s: %s", revived.id, path)
+                    continue
+                logger.info("Документ %s снова в папке компании, в разбор: %s", revived.id, path)
+                revived.dropbox_path = path
+                revived.company = company
+                revived.status = Status.new
+                revived.status_reason = REVIVED_REASON
+                revived.resolved_at = None
+                active.add(h)
+                continue
             if dry:
                 stats["новых"] += 1
                 logger.info("[сухой] завёл бы: %s", path)
                 continue
+            active.add(h)
             session.add(
                 Document(
                     source=Source.manual,
@@ -177,6 +219,7 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
 
         # 2-5. Расхождения по уже известным документам
         to_delete: list[Document] = []
+        left_months: set[tuple[str, str]] = set()
         for doc in docs:
             if not doc.content_hash:
                 continue
@@ -186,7 +229,7 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
             if doc.status == Status.ignored:
                 # Отброшенный документ за файлом не следует: его путь ни
                 # на что не влияет, а указывать на чужой живой файл опасно —
-                # удаление «лишнего экземпляра» снесло бы его.
+                # откладывание «лишнего экземпляра» унесло бы его из папки.
                 #
                 # Исключение — наша же ошибочная пометка «удалён»: файл
                 # нашёлся, значит его не удаляли, а переложили.
@@ -229,6 +272,12 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
                 new_company = _company_of(hit[0], doc.company)
                 logger.info("Документ %s передвинут человеком: %s -> %s",
                             doc.id, doc.dropbox_path, hit[0])
+                if doc.status == Status.filed and doc.company:
+                    # Новый месяц пересоберёт цикл реестра, а старый о
+                    # переезде не узнает: строка осталась бы в обоих.
+                    old_month = registry.month_of(doc)
+                    if old_month:
+                        left_months.add((doc.company, old_month))
                 doc.dropbox_path = hit[0]
                 doc.company = new_company
                 stats["перемещено"] += 1
@@ -269,6 +318,14 @@ async def reconcile_once(dry: bool = False) -> dict[str, int]:
             for doc in to_delete:
                 doc.status = Status.ignored
                 doc.status_reason = DELETED_REASON
+
+        if not dry:
+            for company, month in sorted(left_months):
+                try:
+                    await registry.regenerate(session, company, month)
+                except Exception:
+                    logger.exception("Реестр %s %s после переезда документа не обновлён",
+                                     company, month)
 
     return stats
 
@@ -349,18 +406,16 @@ async def run() -> None:
 
 
 async def _dirty_pairs(session, since: datetime) -> set[tuple[str, str]]:
+    """Реестры, которые надо пересобрать: месяцы всех документов, изменённых
+    с прошлого прохода. Не только разложенных: документ, ушедший из реестра
+    (отброшен, вернулся в разбор), тоже меняет реестр своего месяца."""
     docs = (
-        await session.execute(
-            select(Document).where(
-                Document.status == Status.filed,
-                Document.updated_at > since,
-            )
-        )
+        await session.execute(select(Document).where(Document.updated_at > since))
     ).scalars().all()
     pairs = set()
     for doc in docs:
-        if doc.company and doc.doc_date:
-            month = naming.month_folder(datetime(doc.doc_date.year, doc.doc_date.month, 1))
+        month = registry.month_of(doc) if doc.company else None
+        if month:
             pairs.add((doc.company, month))
     return pairs
 

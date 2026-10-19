@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import naming
 from app.core.config import get_settings
 from app.db.models import Document, Source, Status
-from app.services.dropbox_client import get_dropbox
+from app.services.dropbox_client import content_hash, get_dropbox
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -82,6 +82,29 @@ def build_csv(docs: list[Document]) -> bytes:
     return "﻿".encode("utf-8") + buf.getvalue().encode("utf-8")
 
 
+def month_of(doc: Document) -> str | None:
+    """В реестр какого месяца входит документ.
+
+    Папка, где лежит файл, а не дата документа. Иначе:
+    * файл, положенный вручную без распознанной даты, не попадал ни в один
+      реестр (8 документов на 19.10.2026);
+    * счёт за август, который фин директор положила в сентябрь, уезжал
+      строкой в реестр августа;
+    * документ закрытого месяца, который система кладёт в текущий,
+      дописывался в уже сданный реестр.
+    Дата документа — только для записей без файла в папке компании.
+    """
+    root = settings.dropbox_company_roots.get(doc.company or "")
+    path = doc.dropbox_path or ""
+    if root and path and not path.startswith(settings.dropbox_inbox_path.rstrip("/") + "/"):
+        month = naming.month_of_path(path, root)
+        if month:
+            return month
+    if doc.doc_date:
+        return naming.month_folder(datetime(doc.doc_date.year, doc.doc_date.month, 1))
+    return None
+
+
 async def regenerate(session: AsyncSession, company: str, month: str) -> int:
     """Полная перегенерация реестра одной папки. Идемпотентно.
 
@@ -102,15 +125,22 @@ async def regenerate(session: AsyncSession, company: str, month: str) -> int:
         )
     ).scalars().all()
 
-    docs = [
-        d for d in docs
-        if d.doc_date and naming.month_folder(datetime(d.doc_date.year, d.doc_date.month, 1)) == month
-    ]
-    if not docs:
-        return 0
+    docs = [d for d in docs if month_of(d) == month]
 
-    year = docs[0].doc_date.year
+    year = month.rsplit("_", 1)[1]
     path = f"{root.rstrip('/')}/{year}/{month}/{settings.registry_filename}"
-    await get_dropbox().upload_bytes(build_csv(docs), path)
+    dbx = get_dropbox()
+    data = build_csv(docs)
+    existing = await dbx.hash_of(path)
+    if not docs and existing is None:
+        # Пустой реестр заводим только поверх старого: последний документ
+        # месяца ушёл, а строки в файле остались бы. Папку месяца ради
+        # пустого реестра не создаём.
+        return 0
+    if existing == content_hash(data):
+        # Перезапись того же содержимого — лишняя версия у десктопного
+        # клиента фин директора и лишний повод для conflicted copy.
+        return len(docs)
+    await dbx.upload_bytes(data, path)
     logger.info("Реестр обновлён: %s (%d строк)", path, len(docs))
     return len(docs)

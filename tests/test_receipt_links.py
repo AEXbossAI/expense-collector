@@ -159,7 +159,7 @@ async def test_касса_не_отвечает_повтор_а_не_обсуж�
 
 async def test_pdf_с_пустым_текстом_перечитывается_целиком(monkeypatch):
     """Чек weezmo: текстовый слой — одна строка про электронную подпись,
-    сам чек картинкой. По тексту модель сказала «не документ», файл удалился."""
+    сам чек картинкой. По тексту модель сказала «не документ», файл отбрасывался."""
     calls = []
 
     async def _bytes(doc):
@@ -172,13 +172,13 @@ async def test_pdf_с_пустым_текстом_перечитывается_�
         calls.append(kw)
         return llm.ExtractedDoc(is_expense_document=False, company="unknown")
 
-    async def _discard(doc):
-        pass
+    async def _set_aside(doc):
+        return doc.dropbox_path
 
     monkeypatch.setattr(parser, "_read_bytes", _bytes)
     monkeypatch.setattr(parser.extract, "prepare", _prepare)
     monkeypatch.setattr(llm, "extract_fields", _extract)
-    monkeypatch.setattr(parser.filer, "discard_ignored", _discard)
+    monkeypatch.setattr(parser.filer, "set_aside", _set_aside)
     doc = Document(id=227, source=Source.telegram, kind=Kind.file, mime_type="application/pdf",
                    original_name="weezmo_1e1ca71a.pdf", company="orlanda_engineering",
                    status=Status.new, received_at=datetime(2026, 10, 14, tzinfo=timezone.utc))

@@ -235,12 +235,19 @@ async def _handle_file(session, doc: Document) -> None:
         )
         await _log_attempt(session, doc.id, text, used_model, parsed.model_dump_json(), None)
 
-    if not parsed.is_expense_document:
+    # Ручной файл модель не отбрасывает: фин директор положил его в папку
+    # расходов, и её решение сильнее мнения модели. 30.09 и 13.10.2026 так
+    # были удалены «сводка сделки Partner» и подтверждение заказа Messe
+    # München. Теперь сомнение модели — пометка «проверить» в реестре.
+    doubt: list[str] = []
+    if not parsed.is_expense_document and doc.source == Source.manual:
+        doubt.append("модель считает, что это не документ расхода"
+                     + (f" ({parsed.notes})" if parsed.notes else ""))
+    elif not parsed.is_expense_document:
         doc.status = Status.ignored
         doc.status_reason = parsed.notes or "не является документом расхода"
         if not settings.parser_dry_run:
-            await filer.discard_ignored(doc)
-            doc.dropbox_path = None
+            doc.dropbox_path = await filer.set_aside(doc)
         return
 
     # Порядок приоритетов, от сильного к слабому:
@@ -274,7 +281,7 @@ async def _handle_file(session, doc: Document) -> None:
     _apply_fields(doc, parsed, text)
     await apply_project(session, doc, parsed.project_hint, text)
 
-    problems: list[str] = []
+    problems: list[str] = list(doubt)
     if not await _amount_confirmed(doc, parsed.amount, text, data, mime):
         problems.append("сумма не найдена в тексте документа")
     if parsed.doc_date is None:
@@ -488,6 +495,14 @@ async def _process_one(doc_id: int) -> None:
             if len(attempts) + 1 >= settings.parser_max_attempts:
                 doc.status = Status.failed
                 doc.status_reason = f"разбор не удался {len(attempts) + 1} раз: {exc}"[:2000]
+                if doc.source == Source.manual:
+                    # Файл фин директора, на который никто не посмотрит:
+                    # в реестр failed не попадает, вопросов по нему нет.
+                    await alerts.alert(
+                        f"manual-failed:doc{doc.id}",
+                        f"Файл, положенный вручную, не разобран {len(attempts) + 1} раз "
+                        f"и не попадёт в реестр: {doc.dropbox_path}. Ошибка: {str(exc)[:300]}",
+                    )
 
 
 async def _tick() -> None:

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import naming
 from app.core.config import get_settings
-from app.db.models import Document, MonthState, MoveIntent
+from app.db.models import Document, MonthState, MoveIntent, Source
 from app.services import buffer
 from app.services.dropbox_client import SourceMissing, get_dropbox
 
@@ -142,7 +142,7 @@ async def locate(doc: Document) -> str | None:
 
     Записанный путь, если файл там. Иначе поиск по content_hash во входящих
     и в папках месяцев всех компаний: фин директор перекладывает файлы
-    руками, а сверка узнаёт об этом только раз в сутки.
+    руками, а сверка узнаёт об этом только раз в несколько часов.
     """
     dbx = get_dropbox()
     if doc.dropbox_path and await dbx.exists(doc.dropbox_path):
@@ -167,14 +167,51 @@ async def locate(doc: Document) -> str | None:
     return reconciler._pick(doc.dropbox_path, candidates)[0]
 
 
-async def discard_ignored(doc: Document) -> None:
-    """Файл удаляется, запись остаётся.
+def ignored_path(doc: Document) -> str:
+    """Куда откладывается отброшенный файл: `_inbox/_ignored/<Месяц_Год>`.
 
-    Запись защищает от повторного скачивания того же письма и служит
-    журналом решений. Файл удаляется, потому что рассылка, отрендеренная
-    из HTML-тела, весит мегабайты (Tele2 дала 3.4 МБ) и инбоксу не нужна.
+    Внутри `_inbox`, потому что move_v2 через границу namespace запрещён,
+    а сверка во входящие не смотрит. Префикс id делает имя уникальным:
+    move без autorename при конфликте имён счёл бы, что файл уже на месте.
     """
-    if not doc.dropbox_path:
-        return
-    await get_dropbox().delete(doc.dropbox_path)
-    logger.info("Документ %s помечен ignored, файл удалён из _inbox", doc.id)
+    root = settings.dropbox_inbox_path.rstrip("/")
+    month = naming.month_folder(doc.received_at or datetime.now(timezone.utc))
+    return f"{root}/_ignored/{month}/{doc.id}_{doc.original_name}"
+
+
+async def set_aside(doc: Document) -> str | None:
+    """Убирает файл отброшенного документа с глаз, ничего не удаляя.
+
+    Файлы из Dropbox система не удаляет никогда (решение владельца
+    19.10.2026): удаление «только из инбокса» вызывалось по любому пути
+    и снесло из папок компаний два файла фин директора. Поэтому:
+
+    * файл, положенный человеком, не трогается вообще;
+    * файл, который привезла система (из входящих или уже разложенный ею
+      в папку компании — проигравший экземпляр дубля), уезжает в
+      `_inbox/_ignored`, откуда его можно вернуть руками. Запись остаётся
+      журналом решений и защищает от повторного скачивания того же письма.
+
+    Возвращает путь, по которому файл лежит после вызова.
+    """
+    path = doc.dropbox_path
+    if not path:
+        return None
+    if doc.source == Source.manual:
+        logger.info("Документ %s отброшен, файл фин директора остаётся на месте: %s",
+                    doc.id, path)
+        return path
+    target = ignored_path(doc)
+    if path == target:
+        return path
+    dbx = get_dropbox()
+    await dbx.ensure_folder(target.rsplit("/", 1)[0])
+    try:
+        final = await dbx.move(path, target)
+    except SourceMissing:
+        # Файла по записанному пути нет — откладывать нечего. Если его
+        # переложили руками, сверка найдёт его по содержимому.
+        logger.warning("Документ %s отброшен, файла по пути %s уже нет", doc.id, path)
+        return None
+    logger.info("Документ %s отброшен, файл отложен: %s", doc.id, final)
+    return final
