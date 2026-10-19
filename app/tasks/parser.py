@@ -225,6 +225,16 @@ async def _handle_file(session, doc: Document) -> None:
 
     await _log_attempt(session, doc.id, text, used_model, parsed.model_dump_json(), None)
 
+    if not parsed.is_expense_document and file_data is None and extract.vision_mime(mime) == "application/pdf":
+        # Текстовый слой есть, но не тот: у чека weezmo в нём только строка
+        # про электронную подпись, а сам чек вставлен в PDF картинкой. По
+        # одному тексту такой файл признавался «не документом» и удалялся.
+        logger.info("Документ %s: по тексту не расход, перечитываю сам PDF", doc.id)
+        parsed = await llm.extract_fields(
+            text=text, file_data=data, mime_type="application/pdf", hint=hint_text or None
+        )
+        await _log_attempt(session, doc.id, text, used_model, parsed.model_dump_json(), None)
+
     if not parsed.is_expense_document:
         doc.status = Status.ignored
         doc.status_reason = parsed.notes or "не является документом расхода"
