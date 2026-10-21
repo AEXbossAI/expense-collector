@@ -9,7 +9,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.db.models import DocKind, Document, Source, Status
+from app.db.models import DocKind, Document, RoutingAnswer, Source, Status
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -125,7 +125,12 @@ async def find_business(
             ),
         ),
     )
-    return (await session.execute(stmt)).scalars().first()
+    # Разные номера у документов одного типа — разные расходы, спрашивать
+    # не о чем: так 13.10 ушли вопросами три счёта EasyStaff одного дня.
+    for candidate in (await session.execute(stmt)).scalars():
+        if not distinct_documents(doc, candidate):
+            return candidate
+    return None
 
 
 def rank(doc: Document) -> tuple[int, int, int]:
@@ -180,13 +185,97 @@ def choose_representative(docs: list[Document]) -> Document:
     return sorted(docs, key=lambda d: (tuple(-x for x in rank(d)), d.id))[0]
 
 
-async def group_of(session: AsyncSession, doc: Document) -> list[Document]:
-    """Прямые соседи документа по любому из трёх признаков.
+def _numbers(value: str | None) -> set[str]:
+    """Номера документа как множество: в поле бывает список через запятую
+    (`7714561714860, 7714561714862`), а дефисы модель то ставит, то нет."""
+    if not value:
+        return set()
+    parts = (re.sub(r"[^0-9A-Z]", "", p) for p in re.split(r"[\s,;]+", value.upper()))
+    return {p for p in parts if p}
 
-    Замыкание НЕ транзитивное, на один шаг. Оба реальных случая — счёт и
-    квитанция одним письмом, одно вложение двумя письмами — это прямые
-    соседи. Полное замыкание на годовом объёме означало бы N запросов на
-    документ ради случая, которого в данных нет.
+
+def distinct_documents(a: Document, b: Document) -> bool:
+    """Два документа одного типа с разными номерами — два расхода.
+
+    Счёт и квитанция на одну оплату несут разные номера законно, поэтому
+    правило только для одинакового типа. Подписки с той же суммой каждый
+    месяц (Anthropic, Tonystam, AccRes), два билета одного рейса, счета
+    EasyStaff одного дня — всё это разные номера при совпавших вендоре,
+    сумме и валюте.
+    """
+    na = _numbers(getattr(a, "doc_number", None))
+    nb = _numbers(getattr(b, "doc_number", None))
+    if not na or not nb or na & nb:
+        return False
+    return getattr(a, "doc_kind", None) == getattr(b, "doc_kind", None)
+
+
+def same_expense(a: Document, b: Document, said_different: set[frozenset[int]]) -> bool:
+    """Один ли это расход — для схлопывания на доске.
+
+    Совпадение вендора, суммы и валюты само по себе расход не делает:
+    до 21.10.2026 этого хватало, и синк склеил 26 пар разных расходов,
+    в том числе сентябрь с октябрём одной подписки и пары, которые фин
+    директор прямо назвала разными. Октябрьская строка прятала
+    сентябрьскую, на доске расхода просто не было.
+    """
+    if a.content_hash and a.content_hash == b.content_hash:
+        # Тот же файл байт в байт — двух расходов из него не бывает.
+        return True
+    if frozenset((a.id, b.id)) in said_different:
+        return False
+    if distinct_documents(a, b):
+        return False
+    if (
+        a.vendor and a.vendor == b.vendor
+        and _numbers(a.doc_number) & _numbers(b.doc_number)
+    ):
+        return True
+    if a.business_key and a.business_key == b.business_key:
+        if a.doc_date is None or b.doc_date is None:
+            return False
+        return abs((a.doc_date - b.doc_date).days) <= settings.dedup_date_window_days
+    return False
+
+
+async def said_different(session: AsyncSession, docs: list[Document]) -> set[frozenset[int]]:
+    """Пары, которые человек назвал разными на вопросе «дубль?».
+
+    Вопрос задаётся про документ и того, на кого он похож; второй записан
+    в `also_received_from` как «дубль N». Учитывается последний ответ.
+    """
+    ids = [d.id for d in docs]
+    if not ids:
+        return set()
+    rows = (
+        await session.execute(
+            select(RoutingAnswer)
+            .where(RoutingAnswer.question == "duplicate", RoutingAnswer.document_id.in_(ids))
+            .order_by(RoutingAnswer.answered_at, RoutingAnswer.id)
+        )
+    ).scalars().all()
+    latest: dict[int, str] = {}
+    for r in rows:
+        latest[r.document_id] = r.answer
+    by_id = {d.id: d for d in docs}
+    pairs: set[frozenset[int]] = set()
+    for doc_id, answer in latest.items():
+        if answer != "different":
+            continue
+        m = re.fullmatch(r"дубль (\d+)", (by_id[doc_id].also_received_from or "").strip())
+        if m:
+            pairs.add(frozenset((doc_id, int(m.group(1)))))
+    return pairs
+
+
+async def group_of(session: AsyncSession, doc: Document) -> list[Document]:
+    """Прямые соседи документа, которые с ним один расход (`same_expense`).
+
+    SQL отбирает кандидатов по любому из трёх признаков, решает
+    `same_expense`. Замыкание НЕ транзитивное, на один шаг. Оба реальных
+    случая — счёт и квитанция одним письмом, одно вложение двумя
+    письмами — это прямые соседи. Полное замыкание на годовом объёме
+    означало бы N запросов на документ ради случая, которого в данных нет.
     """
     conditions = []
     if doc.content_hash:
@@ -212,6 +301,9 @@ async def group_of(session: AsyncSession, doc: Document) -> list[Document]:
         )
     ).scalars().all()
 
-    by_id = {d.id: d for d in rows}
-    by_id[doc.id] = doc
-    return sorted(by_id.values(), key=lambda d: d.id)
+    candidates = [d for d in rows if d.id != doc.id]
+    if not candidates:
+        return [doc]
+    blocked = await said_different(session, [doc, *candidates])
+    group = [doc] + [d for d in candidates if same_expense(doc, d, blocked)]
+    return sorted(group, key=lambda d: d.id)
