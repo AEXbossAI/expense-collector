@@ -240,6 +240,29 @@ def test_есть_строка_итого():
     assert "ИТОГО;;;;300,00;EUR" in text
 
 
+def test_итого_по_каждой_валюте_отдельно():
+    """До 22.10.2026 EUR, USD и ILS складывались в одну цифру под меткой
+    первой валюты: реестр октября показывал «24254,89 USD»."""
+    rows = [_Row(), _Row(id=2, amount=100.0, currency="USD"),
+            _Row(id=3, amount=16.03), _Row(id=4, amount=503.38, currency="ILS")]
+    text = registry.build_csv(rows).decode("utf-8-sig")
+    totals = [line for line in text.splitlines() if line.startswith("ИТОГО")]
+    assert totals == ["ИТОГО;;;;300,00;EUR;;", "ИТОГО;;;;503,38;ILS;;", "ИТОГО;;;;100,00;USD;;"]
+
+
+def test_итого_без_валюты_отдельной_строкой_в_конце():
+    rows = [_Row(), _Row(id=2, amount=5.0, currency=None)]
+    totals = [line for line in registry.build_csv(rows).decode("utf-8-sig").splitlines()
+              if line.startswith("ИТОГО")]
+    assert totals == ["ИТОГО;;;;283,97;EUR;;", "ИТОГО;;;;5,00;валюта не указана;;"]
+
+
+def test_пустой_реестр_с_нулевым_итогом():
+    totals = [line for line in registry.build_csv([]).decode("utf-8-sig").splitlines()
+              if line.startswith("ИТОГО")]
+    assert totals == ["ИТОГО;;;;0,00;;;"]
+
+
 def test_источник_по_русски():
     text = registry.build_csv([_Row(source=Source.manual)]).decode("utf-8-sig")
     assert "Вручную" in text

@@ -66,8 +66,7 @@ def build_csv(docs: list[Document]) -> bytes:
     writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
     writer.writerow(HEADERS)
 
-    total = 0.0
-    currency = None
+    totals: dict[str, float] = {}
     for doc in sorted(docs, key=lambda d: (d.doc_date or datetime.max.date(), d.id)):
         name = (doc.dropbox_path or doc.original_name).rsplit("/", 1)[-1]
         amount = float(doc.amount) if doc.amount is not None else None
@@ -82,11 +81,17 @@ def build_csv(docs: list[Document]) -> bytes:
             _notes(doc),
         ])
         if amount is not None:
-            total += amount
-            currency = currency or doc.currency
+            key = (doc.currency or "").upper()
+            totals[key] = totals.get(key, 0.0) + amount
 
+    # Итог по каждой валюте своей строкой. До 22.10.2026 строка была одна:
+    # EUR, USD и ILS складывались под меткой первой валюты, и реестр октября
+    # показывал «24254,89 USD».
     writer.writerow([])
-    writer.writerow(["ИТОГО", "", "", "", f"{total:.2f}".replace(".", ","), currency or "", "", ""])
+    for key in sorted(totals, key=lambda c: (c == "", c)) or [""]:
+        total = totals.get(key, 0.0)
+        label = key or ("валюта не указана" if key in totals else "")
+        writer.writerow(["ИТОГО", "", "", "", f"{total:.2f}".replace(".", ","), label, "", ""])
 
     # BOM обязателен: без него Excel читает файл как ANSI
     return "﻿".encode("utf-8") + buf.getvalue().encode("utf-8")
