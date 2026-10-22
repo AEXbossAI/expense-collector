@@ -476,6 +476,9 @@ async def apply_project(session, doc: Document, project_hint: str | None,
             filename=doc.original_name,
             text=haystack,
             caption=doc.raw_caption or doc.raw_email_body,
+            # Билет и отель — общий расход, а в имени файла стоит имя
+            # пассажира: «(Daniel Cheled)» давало проект «Daniel Tower».
+            match_names=doc.category != naming.TRAVEL_CATEGORY,
         )
     except Exception:
         # Monday недоступен — это не повод не разложить документ.

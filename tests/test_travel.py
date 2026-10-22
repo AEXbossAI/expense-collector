@@ -150,3 +150,18 @@ async def test_файл_системы_уезжает_в_месяц_поездк
     assert path.startswith(f"{ROOT}/2026/December_2026/2026-09-29_")
     assert f"{ROOT}/2026/December_2026" in dbx.folders
     assert note is None
+
+
+async def test_поездка_не_ищет_проект_по_названию(monkeypatch):
+    """Даже полное название проекта в имени билета — имя пассажира, а не объект."""
+    from app.services import projects
+
+    async def _catalog(_s):
+        return [(2794889410, "Daniel Tower")]
+
+    monkeypatch.setattr(projects, "cached_projects", _catalog)
+    found = await projects.resolve(None, filename="Flights (Daniel Tower).pdf", text=None,
+                                   match_names=False)
+    assert found.project_monday_id is None
+    found = await projects.resolve(None, filename="Flights (Daniel Tower).pdf", text=None)
+    assert found.project_monday_id == 2794889410

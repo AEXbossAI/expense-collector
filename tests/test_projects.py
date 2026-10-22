@@ -110,12 +110,17 @@ def test_полное_название_в_тексте_решает():
     assert not hit.ambiguous
 
 
-def test_различающее_слово_в_имени_файла():
-    """orlanda_40376_Amnir.pdf — одного слова «Amnir» достаточно, потому что
-    во всём справочнике оно встречается один раз."""
-    hit = projects.match_project("orlanda_40376_Amnir.pdf", None, CATALOG, RATIO)
-    assert hit.project_monday_id == 2729486131
-    assert hit.source == projects.ProjectSource.filename
+def test_одно_слово_из_названия_в_имени_файла_не_привязывает():
+    """Регрессия 22.10.2026. Билеты `Flights - AZAL ... (Daniel Cheled).pdf`
+    получили проект «Daniel Tower» по имени пассажира, и он попал на
+    кнопки дайджеста ко всем вопросам. Одного слова из названия мало:
+    в имени файла фин директор пишет имена людей."""
+    for name in ("Flights - AZAL TLV-Baku 24-27.09 915.37 USD (Daniel Cheled) TKT.pdf",
+                 "Flights - AZAL EMD 92.20 USD (Daniel Cheled).pdf",
+                 "orlanda_40376_Amnir.pdf"):
+        hit = projects.match_project(name, None, CATALOG, RATIO)
+        assert hit.project_monday_id is None, name
+        assert not hit.ambiguous, name
 
 
 def test_опечатка_в_имени_файла_ловится_нечётко():
@@ -132,16 +137,12 @@ def test_опечатка_в_нескольких_словах_тоже_лови
     assert hit.project_monday_id == 2729486131
 
 
-def test_одно_слово_на_два_проекта_даёт_неоднозначность():
-    """«eilat» из orlanda_40375_static eilat.pdf подходит и к
-    «Eilat project Plot 103-104-105-106», и к «Hotel Eilat».
-
-    Это НЕ дефект матчера. Два кандидата означают вопрос человеку, и
-    пустое поле здесь честнее правдоподобной догадки.
-    """
-    hit = projects.match_project("orlanda_40375_static eilat.pdf", None, CATALOG, RATIO)
+def test_полное_название_на_два_проекта_даёт_неоднозначность():
+    """Два кандидата означают пустое поле, а не догадку."""
+    catalog = CATALOG + [(1, "Eilat")]
+    hit = projects.match_project("orlanda_40375_Hotel Eilat.pdf", None, catalog, RATIO)
     assert hit.project_monday_id is None
-    assert set(hit.ambiguous) == {"Eilat project Plot 103-104-105-106", "Hotel Eilat"}
+    assert set(hit.ambiguous) == {"Hotel Eilat", "Eilat"}
 
 
 def test_обычное_слово_из_текста_не_привязывает_к_проекту():

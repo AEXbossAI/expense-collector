@@ -169,7 +169,7 @@ def match_project(
     projects: list[tuple[int, str]],
     min_ratio: float,
 ) -> Match:
-    """Проект по названию. Три правила по убыванию надёжности, и каждое
+    """Проект по названию. Два правила по убыванию надёжности, и каждое
     срабатывает ТОЛЬКО при единственном кандидате.
 
     `projects` — список (monday_id, name), приходит из кэша справочника.
@@ -225,20 +225,16 @@ def match_project(
     if not file_norm:
         return Match(reason="в тексте полного названия нет, имени файла нет тоже")
 
-    # 2. Различающее слово названия. «Amnir» -> Amnir Project Hedera.
-    words = set(file_norm.split())
-    hits = [(pid, name, ProjectSource.filename)
-            for pid, name in projects if core_words(name) & words]
-    if len(hits) == 1:
-        pid, name, where = hits[0]
-        return Match(pid, name, where, reason=f"различающее слово названия «{name}»")
-    if len(hits) > 1:
-        return Match(
-            ambiguous=tuple(n for _, n, _ in hits),
-            reason=f"различающее слово подошло {len(hits)} проектам",
-        )
+    # Правила «одно различающее слово названия в имени файла» больше нет
+    # (22.10.2026). За всё время оно сработало дважды, и оба раза мимо:
+    # билеты `Flights - AZAL ... (Daniel Cheled).pdf` получили проект
+    # «Daniel Tower» по имени пассажира. Фин директор пишет в имени файла
+    # имена людей — «(Roman)», «Anthropic Anna», — и одно слово из них
+    # совпадает с названием проекта случайно. Счета подрядчиков, ради
+    # которых правило заводилось (`orlanda_40376_Amnir.pdf`), находят
+    # проект раньше, по коду задачи в тексте.
 
-    # 3. Опечатка в имени файла: «Orhot Tota» вместо «Orhot Tora».
+    # 2. Опечатка в имени файла: «Orhot Tota» вместо «Orhot Tora».
     if file_norm:
         scored = [
             (pid, name, best_ratio(normalize(name), file_norm)) for pid, name in projects
@@ -369,9 +365,14 @@ async def resolve(
     filename: str | None,
     text: str | None,
     caption: str | None = None,
+    match_names: bool = True,
 ) -> Resolution:
     """Уровни 1 и 2 каскада. Правило по вендору и вопрос человеку живут
-    выше, в разборщике: им нужен вендор и очередь."""
+    выше, в разборщике: им нужен вендор и очередь.
+
+    `match_names=False` — только код задачи, без поиска названия проекта
+    в имени файла и тексте. Для поездок: в имени билета стоит имя
+    пассажира, а билет — общий расход."""
     codes = find_task_codes(filename, text, caption)
 
     if codes:
@@ -406,6 +407,9 @@ async def resolve(
             task_codes=codes,
             reason=f"код задачи найден ({', '.join(codes)}), но в Monday его нет",
         )
+
+    if not match_names:
+        return Resolution(reason="поиск по названию для этой категории выключен")
 
     projects = await cached_projects(session)
     hit = match_project(filename, text, projects, settings.project_match_min_ratio)
