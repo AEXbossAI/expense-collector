@@ -30,7 +30,7 @@ docker compose up -d --force-recreate
 ## Деплой
 
 ```bash
-tar --exclude='.git' --exclude='__pycache__' --exclude='.env' -czf - app docs Dockerfile docker-compose.yml requirements.txt \
+tar --exclude='.git' --exclude='__pycache__' --exclude='.env' -czf - app migrations docs Dockerfile docker-compose.yml requirements.txt \
   | ssh hetzner-main 'tar -xzf - -C /opt/expense-collector'
 ssh hetzner-main 'cd /opt/expense-collector && docker compose up -d --build --force-recreate'
 ```

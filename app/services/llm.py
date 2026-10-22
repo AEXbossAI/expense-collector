@@ -13,7 +13,7 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-PROMPT_VERSION = "extract_v2"
+PROMPT_VERSION = "extract_v3"
 
 CompanyKey = Literal["orlanda_engineering", "orlanda_israel", "unknown"]
 
@@ -82,6 +82,13 @@ class ExtractedDoc(BaseModel):
     service_period: str | None = Field(
         default=None, description="Период оказания услуги, если отличается от даты документа."
     )
+    travel_date: str | None = Field(
+        default=None,
+        description="Только для перелётов и проживания: дата ПЕРВОГО вылета или дата "
+        "заезда в отель, YYYY-MM-DD. Для услуг, привязанных к перелёту (fast lane, выбор "
+        "места, багаж, смена или возврат билета) — дата этого перелёта. Ищи и в документе, "
+        "и в письме. Не дата документа и не дата оплаты. Даты поездки нет — null.",
+    )
     doc_kind: DocKindKey = Field(
         default="other",
         description="Что это за документ. receipt — квитанция, чек, подтверждение ОПЛАТЫ "
@@ -100,7 +107,8 @@ class ExtractedDoc(BaseModel):
         "а не кому: чек Bolt — Taxi & local transport, счёт Google Workspace — "
         "Software & subscriptions, счёт подрядчика за расчёт конструкции — Subcontracting, "
         "счёт школы или курсов для сотрудника и его семьи — Education, взносы в "
-        "национальное страхование и зарплатные платежи — Payroll & social.",
+        "национальное страхование и зарплатные платежи — Payroll & social, "
+        "авиабилет, отель, услуги аэропорта и визы — Flights & travel.",
     )
     project_hint: str | None = Field(
         default=None,
@@ -148,6 +156,13 @@ SYSTEM = """Ты разбираешь документы по расходам �
 В израильских документах он подписан «חשבון עסקה 40378» — нужно 40378.
 В европейских — Invoice No / Arve nr. Номер поставщика, НЕ номер заказа
 и не номер клиента.
+
+ПОЕЗДКИ:
+Перелёт и проживание относятся к месяцу поездки, а не оплаты, поэтому
+дата поездки нужна отдельно от даты документа. В travel_date — дата
+первого вылета или заезда в отель. Иногда она есть только в письме: «Your
+flight on 14 Oct», «Check-in: 16/09/2026». Год не указан — бери ближайший
+после даты документа. Поездка через границу месяцев — всё равно первая дата.
 
 ПРОЕКТ:
 Если в документе прямо назван объект или проект — перенеси название
@@ -198,7 +213,9 @@ async def extract_fields(
     if text:
         parts.append(f"Текст документа:\n\n{text[:60000]}")
     if hint:
-        parts.append(f"Контекст из письма или подписи к фото:\n{hint[:2000]}")
+        # 8000, а не 2000: даты перелёта в письме авиакомпании стоят ниже
+        # шапки и рекламы, первые две тысячи символов до них не доходили.
+        parts.append(f"Контекст из письма или подписи к фото:\n{hint[:8000]}")
     parts.append("Разбери документ и заполни поля.")
     content.append({"type": "text", "text": "\n\n".join(parts)})
 

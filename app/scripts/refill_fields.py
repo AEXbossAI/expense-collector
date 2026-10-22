@@ -94,10 +94,7 @@ async def _refill_one(doc_id: int, apply: bool) -> str:
         if text is None and file_data is None:
             return f"тип {doc.mime_type} не разбирается"
 
-        hint = f"Имя файла: {doc.original_name}"
-        body = doc.raw_caption or doc.raw_email_body or ""
-        if body:
-            hint += f"\n\n{body}"
+        hint = parser.hint_for(doc)
 
         parsed = await llm.extract_fields(
             text=text, file_data=file_data, mime_type=mime_type, hint=hint

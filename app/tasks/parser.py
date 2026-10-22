@@ -209,10 +209,7 @@ async def _handle_file(session, doc: Document) -> None:
     # Имя файла — полноценный источник подсказок, а не украшение: человек
     # пишет туда и вендора, и объект. До этой правки `original_name` в
     # разбор не попадал вовсе.
-    hint_text = f"Имя файла: {doc.original_name}"
-    body = doc.raw_caption or doc.raw_email_body or ""
-    if body:
-        hint_text += f"\n\n{body}"
+    hint_text = hint_for(doc)
     if hints:
         hint_text += "\n\nНайденные в тексте названия (могут принадлежать и покупателю, и поставщику): " + str(hints)
 
@@ -294,6 +291,8 @@ async def _handle_file(session, doc: Document) -> None:
         notes.append(f"ставка НДС {parsed.vat_rate}% не типична для {final_company}")
 
     doc.company = final_company
+    if doc.source == Source.manual:
+        await note_closed_travel_month(session, doc)
 
     if problems and doc.source == Source.manual:
         # Файл уже лежит в нужной папке, положен человеком. Держать его
@@ -395,6 +394,36 @@ async def _amount_confirmed(doc: Document, amount: float | None, text: str | Non
     return ok
 
 
+def hint_for(doc: Document) -> str:
+    """Контекст для модели помимо самого файла.
+
+    Тема письма и его тело — оба. До 22.10.2026 бралось `raw_caption or
+    raw_email_body`, а у письма caption — это тема, поэтому тело не
+    доходило до модели никогда. Даты перелёта авиакомпании пишут в теле.
+    """
+    parts = [f"Имя файла: {doc.original_name}"]
+    if doc.raw_caption:
+        parts.append(f"Тема письма или подпись к фото: {doc.raw_caption}")
+    if doc.raw_email_body:
+        parts.append(f"Текст письма:\n{doc.raw_email_body}")
+    return "\n\n".join(parts)
+
+
+async def note_closed_travel_month(session, doc: Document) -> None:
+    """Поездка в уже закрытый месяц не дописывается в сданный реестр.
+
+    Файл, привезённый системой, filer в таком случае сам кладёт в текущий
+    месяц с пометкой. Ручной файл не перекладывается, поэтому пометку
+    ставим здесь, и строка остаётся в месяце папки.
+    """
+    travel = naming.travel_date(doc)
+    if not travel or not doc.company:
+        return
+    month = naming.month_folder(datetime(travel.year, travel.month, 1))
+    if await filer.is_month_closed(session, doc.company, month):
+        doc.belongs_to_closed_month = month
+
+
 def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> None:
     doc.vendor = clean(parsed.vendor)
     doc.amount = parsed.amount
@@ -412,6 +441,7 @@ def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> 
         doc.doc_kind = DocKind.other
     doc.doc_number = (clean(parsed.doc_number) or "")[:64] or None
     doc.category = clean(parsed.category)
+    doc.travel_date = _parse_date(parsed.travel_date)
 
 
 async def apply_project(session, doc: Document, project_hint: str | None,

@@ -82,7 +82,9 @@ async def file_document(
         return source, None
 
     if folder is None:
-        effective = doc_date or doc.received_at.date()
+        # Поездка — в месяц вылета или заезда, даже будущий: папка месяца
+        # создаётся ниже, если её ещё нет.
+        effective = naming.travel_date(doc) or doc_date or doc.received_at.date()
         month = naming.month_folder(datetime(effective.year, effective.month, 1))
         if await is_month_closed(session, company, month):
             # Молча дописывать в сданный отчёт нельзя: доверие к реестру

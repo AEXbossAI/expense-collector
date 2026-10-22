@@ -117,8 +117,12 @@ class Document(Base):
 
     # Ключ папки — дата документа, а не дата проводки по банку и не период
     # услуги. Расхождение с выпиской на границах месяца — норма.
+    # Исключение — поездки: их месяц по travel_date, см. naming.expense_month.
     doc_date: Mapped[date | None] = mapped_column(Date)
     service_period: Mapped[str | None] = mapped_column(String(64))
+    # Вылет первого перелёта или заезд в отель. service_period для этого не
+    # годится: там свободный текст вида «14OCT2026» и «рейс LY0513 24/09».
+    travel_date: Mapped[date | None] = mapped_column(Date)
     month_from_receipt: Mapped[bool] = mapped_column(Boolean, default=False)
     belongs_to_closed_month: Mapped[str | None] = mapped_column(String(32))
 

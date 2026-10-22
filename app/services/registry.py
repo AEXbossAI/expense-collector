@@ -40,8 +40,18 @@ def _notes(doc: Document) -> str:
         notes.append("разложено вручную")
     if doc.status_reason and "проверить:" in doc.status_reason:
         notes.append("ПРОВЕРИТЬ: " + doc.status_reason.split("проверить:", 1)[1].strip())
+    travel = naming.travel_date(doc)
+    if travel:
+        notes.append(f"поездка: {travel:%d.%m.%Y}")
     if doc.service_period:
         notes.append(f"период услуги: {doc.service_period}")
+    # Строка поездки уходит в месяц поездки, а файл фин директора остаётся
+    # в её подпапке банка — без пометки его в этом месяце не найти.
+    root = settings.dropbox_company_roots.get(getattr(doc, "company", None) or "")
+    path = getattr(doc, "dropbox_path", None) or ""
+    folder = naming.folder_in_month(path, root) if root else None
+    if folder and folder.split("/", 1)[0] != month_of(doc):
+        notes.append(f"файл в папке {folder}")
     return "; ".join(notes)
 
 
@@ -83,26 +93,8 @@ def build_csv(docs: list[Document]) -> bytes:
 
 
 def month_of(doc: Document) -> str | None:
-    """В реестр какого месяца входит документ.
-
-    Папка, где лежит файл, а не дата документа. Иначе:
-    * файл, положенный вручную без распознанной даты, не попадал ни в один
-      реестр (8 документов на 19.10.2026);
-    * счёт за август, который фин директор положила в сентябрь, уезжал
-      строкой в реестр августа;
-    * документ закрытого месяца, который система кладёт в текущий,
-      дописывался в уже сданный реестр.
-    Дата документа — только для записей без файла в папке компании.
-    """
-    root = settings.dropbox_company_roots.get(doc.company or "")
-    path = doc.dropbox_path or ""
-    if root and path and not path.startswith(settings.dropbox_inbox_path.rstrip("/") + "/"):
-        month = naming.month_of_path(path, root)
-        if month:
-            return month
-    if doc.doc_date:
-        return naming.month_folder(datetime(doc.doc_date.year, doc.doc_date.month, 1))
-    return None
+    """В реестр какого месяца входит документ — `naming.expense_month`."""
+    return naming.expense_month(doc)
 
 
 async def regenerate(session: AsyncSession, company: str, month: str) -> int:

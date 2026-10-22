@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from app.core.config import get_settings
 
@@ -39,6 +39,58 @@ def month_of_path(path: str, root: str) -> str | None:
     rel = path[len(prefix):].split("/")
     if len(rel) >= 3 and rel[0].isdigit() and is_month_folder(rel[1]):
         return rel[1]
+    return None
+
+
+# Поездки относятся к месяцу самой поездки, а не оплаты (решение фин
+# директора 22.10.2026): билет на октябрь, купленный в сентябре, — расход
+# октября. Значение совпадает с категорией из закрытого списка в llm.py.
+TRAVEL_CATEGORY = "Flights & travel"
+
+
+def travel_date(doc) -> date | None:
+    """Дата вылета или заезда, если документ — поездка и дата известна."""
+    if getattr(doc, "category", None) != TRAVEL_CATEGORY:
+        return None
+    return getattr(doc, "travel_date", None)
+
+
+def expense_month(doc) -> str | None:
+    """К какому месяцу относится расход. Одно правило для папки, реестра
+    и колонки Billing month на доске.
+
+    1. Поездка с известной датой — месяц вылета или заезда. Даже если файл
+       фин директор положила в папку другого месяца: файл остаётся в её
+       подпапке банка, а строка уходит в месяц поездки. Кроме поездки в
+       уже закрытый месяц — сданный реестр не дописывается.
+    2. Файл лежит в папке месяца компании — этот месяц. Иначе ручной файл
+       без распознанной даты не попадал ни в один реестр, а счёт за август,
+       положенный в сентябрь, уезжал строкой в август.
+    3. Месяц документа (у квитанции это месяц оплаты).
+    """
+    travel = travel_date(doc)
+    if travel and not getattr(doc, "belongs_to_closed_month", None):
+        return month_folder(datetime(travel.year, travel.month, 1))
+    root = settings.dropbox_company_roots.get(getattr(doc, "company", None) or "")
+    path = getattr(doc, "dropbox_path", None) or ""
+    if root and path and not path.startswith(settings.dropbox_inbox_path.rstrip("/") + "/"):
+        month = month_of_path(path, root)
+        if month:
+            return month
+    doc_date = getattr(doc, "doc_date", None)
+    if doc_date:
+        return month_folder(datetime(doc_date.year, doc_date.month, 1))
+    return None
+
+
+def folder_in_month(path: str, root: str) -> str | None:
+    """Папка файла от папки месяца: `September_2026/+ invoices REVOLUT`."""
+    prefix = root.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return None
+    rel = path[len(prefix):].split("/")
+    if len(rel) >= 3 and rel[0].isdigit() and is_month_folder(rel[1]):
+        return "/".join(rel[1:-1])
     return None
 
 

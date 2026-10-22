@@ -181,8 +181,10 @@ def fields(doc: Document) -> dict[str, object]:
     if url:
         out[SOURCE_FILE] = {"url": url, "text": doc.original_name[:60]}
 
-    when = doc.doc_date or doc.received_at.date()
-    out[BILLING_MONTH] = naming.month_folder(_as_datetime(when))
+    # Тот же месяц, что у папки и реестра: поездка — месяц поездки.
+    out[BILLING_MONTH] = naming.expense_month(doc) or naming.month_folder(
+        _as_datetime(doc.received_at.date())
+    )
 
     if doc.vendor:
         out[VENDOR] = doc.vendor[:255]
