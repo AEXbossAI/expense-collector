@@ -82,13 +82,6 @@ class ExtractedDoc(BaseModel):
     service_period: str | None = Field(
         default=None, description="Период оказания услуги, если отличается от даты документа."
     )
-    travel_date: str | None = Field(
-        default=None,
-        description="Только для перелётов и проживания: дата ПЕРВОГО вылета или дата "
-        "заезда в отель, YYYY-MM-DD. Для услуг, привязанных к перелёту (fast lane, выбор "
-        "места, багаж, смена или возврат билета) — дата этого перелёта. Ищи и в документе, "
-        "и в письме. Не дата документа и не дата оплаты. Даты поездки нет — null.",
-    )
     doc_kind: DocKindKey = Field(
         default="other",
         description="Что это за документ. receipt — квитанция, чек, подтверждение ОПЛАТЫ "
@@ -156,13 +149,6 @@ SYSTEM = """Ты разбираешь документы по расходам �
 В израильских документах он подписан «חשבון עסקה 40378» — нужно 40378.
 В европейских — Invoice No / Arve nr. Номер поставщика, НЕ номер заказа
 и не номер клиента.
-
-ПОЕЗДКИ:
-Перелёт и проживание относятся к месяцу поездки, а не оплаты, поэтому
-дата поездки нужна отдельно от даты документа. В travel_date — дата
-первого вылета или заезда в отель. Иногда она есть только в письме: «Your
-flight on 14 Oct», «Check-in: 16/09/2026». Год не указан — бери ближайший
-после даты документа. Поездка через границу месяцев — всё равно первая дата.
 
 ПРОЕКТ:
 Если в документе прямо назван объект или проект — перенеси название
@@ -264,6 +250,60 @@ async def read_total(data: bytes, mime_type: str) -> str | None:
         output_format=PrintedTotal,
     )
     return response.parsed_output.total_as_printed
+
+
+class TravelDate(BaseModel):
+    travel_date: str | None = Field(
+        default=None,
+        description="Дата первого вылета или заезда в отель, YYYY-MM-DD. null, если её нет.",
+    )
+
+
+TRAVEL_SYSTEM = """Документ — расход на поездку: авиабилет, отель, услуга аэропорта.
+Нужна дата самой поездки: первого вылета или заезда в отель. Для услуг при
+перелёте (fast lane, выбор места, багаж, смена или возврат билета) — дата
+этого перелёта. Поездка через границу месяцев — всё равно первая дата.
+
+Это НЕ дата документа и НЕ дата оплаты. Иногда дата есть только в письме:
+«Your flight on 14 Oct», «Check-in: 16/09/2026». Год не указан — бери
+ближайший после даты документа. Даты поездки нигде нет — верни null,
+не угадывай."""
+
+
+async def read_travel_date(
+    *,
+    text: str | None = None,
+    file_data: bytes | None = None,
+    mime_type: str | None = None,
+    hint: str | None = None,
+) -> str | None:
+    """Дата поездки — отдельным вызовом, а не полем ExtractedDoc.
+
+    22.10.2026 поле travel_date в ExtractedDoc уронило разбор целиком:
+    API ответил «Schema is too complex» даже на простую строку. Схема
+    основного разбора на пределе, поэтому дата поездки спрашивается
+    отдельно и только у документов категории Flights & travel.
+    """
+    content: list[dict] = []
+    if file_data and mime_type:
+        content.append(_doc_block(file_data, mime_type))
+    parts = []
+    if text:
+        parts.append(f"Текст документа:\n\n{text[:60000]}")
+    if hint:
+        parts.append(f"Контекст из письма или подписи к фото:\n{hint[:8000]}")
+    parts.append("Дата поездки?")
+    content.append({"type": "text", "text": "\n\n".join(parts)})
+    response = await get_client().messages.parse(
+        model=settings.parser_model,
+        max_tokens=2000,
+        system=TRAVEL_SYSTEM,
+        thinking={"type": "adaptive"},
+        output_config={"effort": "low"},
+        messages=[{"role": "user", "content": content}],
+        output_format=TravelDate,
+    )
+    return response.parsed_output.travel_date
 
 
 class TextOnlyVerdict(BaseModel):

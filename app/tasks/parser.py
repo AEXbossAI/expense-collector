@@ -219,6 +219,7 @@ async def _handle_file(session, doc: Document) -> None:
     parsed = await llm.extract_fields(
         text=text, file_data=file_data, mime_type=mime_type, hint=hint_text or None
     )
+    read_data, read_mime = file_data, mime_type
 
     await _log_attempt(session, doc.id, text, used_model, parsed.model_dump_json(), None)
 
@@ -231,6 +232,15 @@ async def _handle_file(session, doc: Document) -> None:
             text=text, file_data=data, mime_type="application/pdf", hint=hint_text or None
         )
         await _log_attempt(session, doc.id, text, used_model, parsed.model_dump_json(), None)
+        read_data, read_mime = data, "application/pdf"
+
+    # Поездка относится к месяцу вылета или заезда. Дата поездки — отдельный
+    # вызов, см. llm.read_travel_date: в схеме основного разбора ей нет места.
+    doc.travel_date = None
+    if parsed.category == naming.TRAVEL_CATEGORY:
+        doc.travel_date = _parse_date(await llm.read_travel_date(
+            text=text, file_data=read_data, mime_type=read_mime, hint=hint_text or None
+        ))
 
     # Ручной файл модель не отбрасывает: фин директор положил его в папку
     # расходов, и её решение сильнее мнения модели. 30.09 и 13.10.2026 так
@@ -441,7 +451,6 @@ def _apply_fields(doc: Document, parsed: llm.ExtractedDoc, text: str | None) -> 
         doc.doc_kind = DocKind.other
     doc.doc_number = (clean(parsed.doc_number) or "")[:64] or None
     doc.category = clean(parsed.category)
-    doc.travel_date = _parse_date(parsed.travel_date)
 
 
 async def apply_project(session, doc: Document, project_hint: str | None,

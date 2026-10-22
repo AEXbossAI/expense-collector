@@ -90,11 +90,12 @@ async def _ask(doc_id: int) -> dict:
         text, file_data, mime_type = await extract.prepare(data, mime)
         if text is None and file_data is None:
             return {"id": doc_id, "error": f"тип {doc.mime_type} не разбирается"}
-        parsed = await llm.extract_fields(
+        travel = await llm.read_travel_date(
             text=text, file_data=file_data, mime_type=mime_type, hint=parser.hint_for(doc)
         )
-        return {"id": doc_id, "travel_date": parsed.travel_date,
-                "result": parsed.model_dump_json(), "text": (text or "")[:200000]}
+        result = llm.TravelDate(travel_date=travel).model_dump_json()
+        return {"id": doc_id, "travel_date": travel,
+                "result": result, "text": (text or "")[:200000]}
 
 
 def _describe(doc: Document, travel: date | None) -> str:

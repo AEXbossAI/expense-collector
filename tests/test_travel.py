@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from types import SimpleNamespace
 
 from app.core import naming
 from app.db.models import Document, Source, Status
@@ -97,17 +96,6 @@ def test_модель_видит_и_тему_и_тело_письма():
     doc = _doc(source=Source.mail, raw_caption="Your booking", raw_email_body="Flight on 14 Oct")
     hint = parser.hint_for(doc)
     assert "Your booking" in hint and "Flight on 14 Oct" in hint
-
-
-def test_дата_поездки_сохраняется_из_разбора():
-    doc = _doc(travel_date=None)
-    parsed = SimpleNamespace(
-        vendor="TUS Airways", amount=192.09, currency="EUR", purpose="Авиабилеты",
-        service_period="2026-10-14 — 2026-10-19", doc_date="2026-09-29", doc_kind="receipt",
-        doc_number="X1", category=TRAVEL, travel_date="2026-10-14",
-    )
-    parser._apply_fields(doc, parsed, None)
-    assert doc.travel_date == date(2026, 10, 14)
 
 
 async def test_ручной_билет_в_закрытый_месяц_помечается(monkeypatch):
